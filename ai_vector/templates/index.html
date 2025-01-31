@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>URL 기반 벡터 DB 시스템</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: #2c3e50;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .mode-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .mode-button {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 5px;
+            background-color: #3498db;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .mode-button:hover {
+            background-color: #2980b9;
+        }
+
+        .mode-button.admin {
+            background-color: #e74c3c;
+        }
+
+        .url-input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+
+        .result-area {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+
+        .chat-area {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+        }
+
+        .chat-input {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .chat-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .chat-input button {
+            padding: 10px 20px;
+            background-color: #2ecc71;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .chat-input button:hover {
+            background-color: #27ae60;
+        }
+
+        .error {
+            color: #e74c3c;
+            margin-top: 10px;
+        }
+
+        .info {
+            color: #3498db;
+            margin-top: 10px;
+        }
+
+        .preview-area {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .preview-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #2c3e50;
+        }
+
+        .metadata {
+            font-size: 0.9em;
+            color: #7f8c8d;
+            margin-bottom: 10px;
+        }
+
+        .content-preview {
+            white-space: pre-wrap;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>URL 기반 벡터 DB 시스템</h1>
+        
+        <div class="mode-selector">
+            <button class="mode-button admin" onclick="selectMode('admin')">관리자 모드</button>
+            <button class="mode-button" onclick="selectMode('add')">URL 추가</button>
+            <button class="mode-button" onclick="selectMode('query')">질의하기</button>
+            <button class="mode-button" onclick="selectMode('inspect')">URL 정보 확인</button>
+        </div>
+
+        <div id="url-input-area">
+            <input type="text" class="url-input" placeholder="URL을 입력하세요" id="url-input">
+            <button class="mode-button" onclick="processUrl()">처리</button>
+        </div>
+
+        <div id="preview-area" class="preview-area" style="display: none;">
+            <div class="preview-title">URL 정보 미리보기</div>
+            <div class="metadata" id="metadata"></div>
+            <div class="content-preview" id="content-preview"></div>
+        </div>
+
+        <div id="chat-area" class="chat-area" style="display: none;">
+            <div id="chat-history"></div>
+            <div class="chat-input">
+                <input type="text" placeholder="질문을 입력하세요" id="query-input">
+                <button onclick="sendQuery()">전송</button>
+            </div>
+        </div>
+
+        <div id="result-area" class="result-area"></div>
+    </div>
+
+    <script>
+        let currentMode = '';
+
+        function selectMode(mode) {
+            currentMode = mode;
+            document.getElementById('result-area').innerHTML = '';
+            
+            if (mode === 'query') {
+                document.getElementById('url-input-area').style.display = 'none';
+                document.getElementById('chat-area').style.display = 'block';
+                document.getElementById('preview-area').style.display = 'none';
+            } else {
+                document.getElementById('url-input-area').style.display = 'block';
+                document.getElementById('chat-area').style.display = 'none';
+                document.getElementById('preview-area').style.display = 'none';
+            }
+
+            if (mode === 'admin') {
+                if (!confirm('관리자 모드는 기존 DB를 초기화합니다. 계속하시겠습니까?')) {
+                    currentMode = '';
+                    return;
+                }
+            }
+        }
+
+        async function processUrl() {
+            const url = document.getElementById('url-input').value;
+            if (!url) {
+                showError('URL을 입력해주세요.');
+                return;
+            }
+
+            try {
+                const response = await fetch('/process-url', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        url: url,
+                        mode: currentMode
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    showInfo(data.message);
+                    if (data.preview) {
+                        showPreview(data.preview);
+                    }
+                } else {
+                    showError(data.message);
+                }
+            } catch (error) {
+                showError('처리 중 오류가 발생했습니다.');
+            }
+        }
+
+        async function sendQuery() {
+            const query = document.getElementById('query-input').value;
+            if (!query) return;
+
+            try {
+                const response = await fetch('/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ query: query })
+                });
+
+                const data = await response.json();
+                const chatHistory = document.getElementById('chat-history');
+                
+                if (data.success) {
+                    chatHistory.innerHTML += `
+                        <div class="query">Q: ${query}</div>
+                        <div class="answer">A: ${data.result.answer}</div>
+                        <div class="sources">출처: ${data.result.sources.join(', ')}</div>
+                    `;
+                } else {
+                    chatHistory.innerHTML += `
+                        <div class="query">Q: ${query}</div>
+                        <div class="error">오류: ${data.message}</div>
+                    `;
+                }
+                
+                document.getElementById('query-input').value = '';
+            } catch (error) {
+                showError('질의 처리 중 오류가 발생했습니다.');
+            }
+        }
+
+        function showError(message) {
+            document.getElementById('result-area').innerHTML = `
+                <div class="error">${message}</div>
+            `;
+        }
+
+        function showInfo(message) {
+            document.getElementById('result-area').innerHTML = `
+                <div class="info">${message}</div>
+            `;
+        }
+
+        function showPreview(preview) {
+            document.getElementById('preview-area').style.display = 'block';
+            document.getElementById('metadata').innerHTML = preview.metadata;
+            document.getElementById('content-preview').innerHTML = preview.content;
+        }
+    </script>
+</body>
+</html> 
