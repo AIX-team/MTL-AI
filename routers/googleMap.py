@@ -13,10 +13,10 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 
 # 지역 
-@router.get("/location", response_model=List[Location])
+@router.get("/locations", response_model=List[Location])
 def read_location():
     return [
-         # {"name" : "Location 1", "lat": 37.4783, "lng": 126.9512},
+        # {"name" : "Location 1", "lat": 37.4783, "lng": 126.9512},
         # {"name" : "Location 2", "lat": 34.0522, "lng": -118.2437},
         # {"name" : "Location 3", "lat": 40.7128, "lng": -74.0060 },
     ]

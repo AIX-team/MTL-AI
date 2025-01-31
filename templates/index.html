@@ -43,12 +43,29 @@
             // Google map placesService 가져옵니다.
             const { PlacesService } = await google.maps.importLibrary("places");
 
+
+            // 지도의 지정한 좌표 설정 (처음 시작)
+            map = new google.maps.Map(document.getElementById("map"), {
+                zoom: 5,
+                center: { lat: 37.4783, lng: 126.9512 } // 한국에서 시작
+            });
+
+            // PlacesService 초기화
+            placesService = new PlacesService(map);
+            // Geocoding 서비스 초기화
+            geocoder = new google.maps.Geocoder();
+
             // locations의 지정한 좌표를 넣는다.
             const response = await fetch('/locations');
             const locations = await response.json();
 
+            // 지정한 위치에 마커 추가
+            locations.forEach(location => {
+                addMarker({ lat: location.lat, lng: location.lng }, location.name, location.placeId);
+            });
+
             // 검색 입력 필드(입력,버튼)
-            const input = document.getElementById("search"); 
+            const input = document.getElementById("search");
             const searchButton = document.getElementById("searchButton");
 
             if (input && searchButton) {
@@ -63,22 +80,6 @@
             } else {
                 console.error("검색 입력 필드 또는 버튼을 찾을 수 없습니다.");
             }
-
-            // 지도의 지정한 좌표 설정
-            map = new google.maps.Map(document.getElementById("map"), {
-                zoom: 5,
-                center: { lat: 37.4783, lng: 126.9512 } // 한국에서 시작
-            });
-
-            // PlacesService 초기화
-            placesService = new PlacesService(map);
-            // Geocoding 서비스 초기화
-            geocoder = new google.maps.Geocoder();
-
-            // 지정한 위치에 마커 추가
-            locations.forEach(location => {
-                addMarker({ lat: location.lat, lng: location.lng }, location.name, location.placeId);
-            });
 
             // 지도 클릭 이벤트
             map.addListener('click', (event) => {
@@ -125,31 +126,48 @@
             });
             markers = []; // 마커 배열 초기화
         }
-         
+
         // 장소 정보를 가져오는 함수 
         function getPlaceDetails(placeId, marker) {
-            placesService.getDetails({ placeId: placeId }, (place, status) => {
-                if (status === google.maps.places.PlacesServiceStatus.OK) { // 대문자 'OK'
+            const request = {
+                placeId: placeId,
+                fields: ["name", "formatted_address", "rating", "reviews"],
+            };
+        
+            placesService.getDetails(request, (place, status) => {
+                if (status === google.maps.places.PlacesServiceStatus.OK && place) {
+                    let contentString = `
+                        <div style="text-align: center;">
+                            <h4>${place.name}</h4>
+                            <p>${place.formatted_address}</p>
+                            <p>${place.rating ? `평점: ${place.rating}` : '평점 제공되지 않음'}</p>
+                    `;
+        
+                    // 리뷰가 있는 경우 첫 번째 리뷰 표시
+                    if (place.reviews && place.reviews.length > 0) {
+                        const review = place.reviews[0];
+                        contentString += `
+                            <div><strong>리뷰:</strong> ${review.text}</div>
+                            <div><strong>작성자:</strong> ${review.author_name}</div>
+                        `;
+                    } else {
+                        contentString += "<p>리뷰가 없습니다.</p>";
+                    }
+        
+                    contentString += "</div>";
+        
                     const infoWindow = new google.maps.InfoWindow({
-                        content: `
-                            <div style="text-align: center;">
-                                <h4>${place.name}</h4>
-                                <img src="${place.photos ? place.photos[0].getUrl({ maxWidth: 100 }) : ''}" alt="${place.name}" style="width: 100px; height: auto;">
-                                <p>${place.formatted_address}</p>
-                                <p>${place.rating ? `Rating: ${place.rating}` : 'No rating available'}</p>
-                                <p>${place.international_phone_number ? `전화: ${place.international_phone_number}` : ''}</p>
-                                <p>${place.website ? `<a href="${place.website}" target="_blank">웹사이트</a>` : ''}</p>
-                            </div>
-                        `,      
+                        content: contentString,
                     });
+        
                     infoWindow.open(map, marker);
-                    map.setZoom(15);
-                    map.setCenter(marker.getPosition());
                 } else {
-                    console.error("장소 세부 정보를 가져오는 데 실패했습니다:", status);
+                    console.error("Place details를 가져오지 못했습니다.", status);
+                    alert("장소 정보를 가져올 수 없습니다. 다시 시도하세요.");
                 }
             });
         }
+        
 
         function geocodeAddress(address) {
             geocoder.geocode({ address: address }, (results, status) => {
