@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Maps</title>
+    <script>
+        const apiKey = "{{api_key}}"; // API 키를 넣으세요
+
+        // Google Maps API URL 생성
+        const mapsApiUrl = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places`;
+
+        // Google Maps API 로드
+        const script = document.createElement('script');
+        script.src = mapsApiUrl;
+        script.async = true;
+        script.defer = true;
+        script.onload = () => {
+            initMap(); // API가 로드된 후 initMap 호출
+        };
+        document.head.appendChild(script);
+    </script>
+
+    <style>
+        /* 지도 스타일 */
+        #map {
+            height: 500px;
+            width: 100%;
+        }
+
+        #search {
+            margin: 10px;
+        }
+    </style>
+    <script>
+        let map;
+        let markers = []; // 마커를 저장할 배열
+        let polyline; // 폴리라인 객체
+        let placesService; // 장소 서비스 
+        let geocoder; // 주소를 경도와 위도로 바꾸는 기능
+
+        async function initMap() {
+            // Google map placesService 가져옵니다.
+            const { PlacesService } = await google.maps.importLibrary("places");
+
+            // locations의 지정한 좌표를 넣는다.
+            const response = await fetch('/locations');
+            const locations = await response.json();
+
+            // 검색 입력 필드(입력,버튼)
+            const input = document.getElementById("search"); 
+            const searchButton = document.getElementById("searchButton");
+
+            if (input && searchButton) {
+                searchButton.addEventListener('click', () => {
+                    const query = input.value.trim(); // 공백 제거
+                    if (query) { // 입력값이 비어있지 않은 경우에만 검색
+                        searchPlaces(query);
+                    } else {
+                        console.error("검색어가 비어 있습니다.");
+                    }
+                });
+            } else {
+                console.error("검색 입력 필드 또는 버튼을 찾을 수 없습니다.");
+            }
+
+            // 지도의 지정한 좌표 설정
+            map = new google.maps.Map(document.getElementById("map"), {
+                zoom: 5,
+                center: { lat: 37.4783, lng: 126.9512 } // 한국에서 시작
+            });
+
+            // PlacesService 초기화
+            placesService = new PlacesService(map);
+            // Geocoding 서비스 초기화
+            geocoder = new google.maps.Geocoder();
+
+            // 지정한 위치에 마커 추가
+            locations.forEach(location => {
+                addMarker({ lat: location.lat, lng: location.lng }, location.name, location.placeId);
+            });
+
+            // 지도 클릭 이벤트
+            map.addListener('click', (event) => {
+                addMarker(event.latLng, "New Marker", null); // 클릭한 위치에 마커 추가
+            });
+        }
+
+        function searchPlaces(query) {
+            const request = {
+                location: map.getCenter(), // 현재 지도 중심을 위치로 사용
+                radius: '500', // 검색 반경 (미터)
+                keyword: query // 검색할 키워드
+            };
+        
+            // 장소 검색
+            placesService.nearbySearch(request, (results, status) => {
+                if (status === google.maps.places.PlacesServiceStatus.OK) {
+                    // 기존의 있던 마커 제거 
+                    clearMarker();
+        
+                    results.forEach(place => {
+                        const marker = new google.maps.Marker({
+                            position: place.geometry.location,
+                            map: map,
+                            title: place.name,
+                        });
+                        markers.push(marker);
+        
+                        // 마커 클릭 이벤트 
+                        marker.addListener('click', () => {
+                            getPlaceDetails(place.place_id, marker);
+                        });
+                    });
+                } else {
+                    console.log("장소 검색 실패:", status);
+                }
+            });
+        }
+
+        function clearMarker() {
+            // 모든 마커를 지도에서 제거
+            markers.forEach(marker => {
+                marker.setMap(null);
+            });
+            markers = []; // 마커 배열 초기화
+        }
+         
+        // 장소 정보를 가져오는 함수 
+        function getPlaceDetails(placeId, marker) {
+            placesService.getDetails({ placeId: placeId }, (place, status) => {
+                if (status === google.maps.places.PlacesServiceStatus.OK) { // 대문자 'OK'
+                    const infoWindow = new google.maps.InfoWindow({
+                        content: `
+                            <div style="text-align: center;">
+                                <h4>${place.name}</h4>
+                                <img src="${place.photos ? place.photos[0].getUrl({ maxWidth: 100 }) : ''}" alt="${place.name}" style="width: 100px; height: auto;">
+                                <p>${place.formatted_address}</p>
+                                <p>${place.rating ? `Rating: ${place.rating}` : 'No rating available'}</p>
+                                <p>${place.international_phone_number ? `전화: ${place.international_phone_number}` : ''}</p>
+                                <p>${place.website ? `<a href="${place.website}" target="_blank">웹사이트</a>` : ''}</p>
+                            </div>
+                        `,      
+                    });
+                    infoWindow.open(map, marker);
+                    map.setZoom(15);
+                    map.setCenter(marker.getPosition());
+                } else {
+                    console.error("장소 세부 정보를 가져오는 데 실패했습니다:", status);
+                }
+            });
+        }
+
+        function geocodeAddress(address) {
+            geocoder.geocode({ address: address }, (results, status) => {
+                if (status === "OK") {
+                    const location = results[0].geometry.location;
+                    console.log("위도:", location.lat(), "경도:", location.lng());
+
+                    // 지도를 변환된 위치로 이동 및 확대
+                    map.setCenter(location);
+                    map.setZoom(15);
+
+                    // 마커 추가
+                    addMarker(location, results[0].formatted_address);
+
+                    // 결과를 화면에 출력하거나 필요한 작업 수행
+                    const resultDiv = document.getElementById("result");
+                    resultDiv.innerHTML = ` 
+                        <p><strong>주소:</strong> ${results[0].formatted_address}</p>
+                        <p><strong>위도:</strong> ${location.lat()}</p>
+                        <p><strong>경도:</strong> ${location.lng()}</p>
+                    `;
+                } else {
+                    console.log("Geocode 실패:", status);
+                    alert("주소를 변환할 수 없습니다. 다시 시도하세요.");
+                }
+            });
+        }
+
+        // 마커 추가 함수
+        function addMarker(location, title, placeId) {
+            const marker = new google.maps.Marker({
+                position: location,
+                map: map,
+                title: title || "New Marker",
+                icon: {
+                    url: "/static/images/location.png", // 커스텀 아이콘 URL
+                    scaledSize: new google.maps.Size(30, 30) // 아이콘 크기 조정
+                }
+            });
+
+            // placeId 정의된 경우에만 마커를 추가
+            if (placeId) {
+                marker.placeId = placeId;
+                // 마커 클릭 이벤트
+                marker.addListener('click', () => {
+                    getPlaceDetails(marker.placeId, marker); // placeId가 존재할 때만
+                }); 
+            }
+            
+            markers.push(marker); // 새로 생성한 마커를 배열에 추가
+
+            // 폴리라인 업데이트
+            updatePolyline();
+        }
+
+        // 폴리라인 업데이트 함수
+        function updatePolyline() {
+            if (polyline) {
+                polyline.setMap(null); // 기존 폴리라인 제거
+            }
+
+            const path = markers.map(marker => marker.getPosition()); // 마커 위치 배열 생성
+
+            polyline = new google.maps.Polyline({
+                path: path,
+                geodesic: true,
+                strokeColor: '#FF0000', // 선 색상
+                strokeOpacity: 1.0,
+                strokeWeight: 2
+            });
+
+            polyline.setMap(map); // 폴리라인을 지도에 추가
+        }
+
+    </script>
+</head>
+<body onload="initMap()">
+    <h1>Google Maps</h1>
+    <input id="search" type="text" placeholder="장소를 입력하세요">
+    <button id="searchButton">검색</button>
+    <div id="map"></div>
+    <div id="result" style="margin-top: 20px"></div>
+</body>
+</html>
