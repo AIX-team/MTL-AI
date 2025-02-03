@@ -36,56 +36,51 @@
         let map;
         let markers = []; // 마커를 저장할 배열
         let polyline; // 폴리라인 객체
-        let placesService; // 장소 서비스 
-        let geocoder; // 주소를 경도와 위도로 바꾸는 기능
-
+        let placesService; // google Map 장소 서비스
+        let geocoder; 
+        let infoWindow; 
+        
         async function initMap() {
-            // Google map placesService 가져옵니다.
-            const { PlacesService } = await google.maps.importLibrary("places");
 
-            // locations의 지정한 좌표를 넣는다.
-            const response = await fetch('/locations');
-            const locations = await response.json();
-
-            // 검색 입력 필드(입력,버튼)
-            const input = document.getElementById("search"); 
-            const searchButton = document.getElementById("searchButton");
-
-            if (input && searchButton) {
-                searchButton.addEventListener('click', () => {
-                    const query = input.value.trim(); // 공백 제거
-                    if (query) { // 입력값이 비어있지 않은 경우에만 검색
-                        searchPlaces(query);
-                    } else {
-                        console.error("검색어가 비어 있습니다.");
-                    }
-                });
-            } else {
-                console.error("검색 입력 필드 또는 버튼을 찾을 수 없습니다.");
-            }
-
-            // 지도의 지정한 좌표 설정
+            // 지도 시작
             map = new google.maps.Map(document.getElementById("map"), {
-                zoom: 5,
+                zoom: 10,
                 center: { lat: 37.4783, lng: 126.9512 } // 한국에서 시작
             });
-
-            // PlacesService 초기화
-            placesService = new PlacesService(map);
-            // Geocoding 서비스 초기화
-            geocoder = new google.maps.Geocoder();
-
-            // 지정한 위치에 마커 추가
-            locations.forEach(location => {
-                addMarker({ lat: location.lat, lng: location.lng }, location.name, location.placeId);
+        
+            placesService = new google.maps.places.PlacesService(map); // PlacesService 초기화
+            geocoder = new google.maps.Geocoder();  // Geocoding 서비스 초기화
+            infoWindow = new google.maps.InfoWindow(); //infoWIndow 초기화
+        
+            // 검색 입력 필드(입력,버튼)
+            const input = document.getElementById("search");
+            const searchButton = document.getElementById("searchButton");
+        
+            searchButton.addEventListener('click', () => {
+                const query = input.value.trim();
+                if (query) {
+                    searchPlaces(query);
+                } else {
+                    console.error("검색어가 비어 있습니다.");
+                }
             });
-
+ 
             // 지도 클릭 이벤트
             map.addListener('click', (event) => {
-                addMarker(event.latLng, "New Marker", null); // 클릭한 위치에 마커 추가
+                const location = event.latLng;
+                addMarker(location);
+                getPlaceId(location);
             });
-        }
 
+            // 마커 초기화
+            const clearMarkersButton = document.getElementById("clearMarkersButton");
+            clearMarkersButton.addEventListener('click', () => {
+            clearMarkers();
+            });
+
+        }        
+
+        // 장소 검색
         function searchPlaces(query) {
             const request = {
                 location: map.getCenter(), // 현재 지도 중심을 위치로 사용
@@ -93,11 +88,10 @@
                 keyword: query // 검색할 키워드
             };
         
-            // 장소 검색
             placesService.nearbySearch(request, (results, status) => {
                 if (status === google.maps.places.PlacesServiceStatus.OK) {
                     // 기존의 있던 마커 제거 
-                    clearMarker();
+                    clearMarkers();
         
                     results.forEach(place => {
                         const marker = new google.maps.Marker({
@@ -108,9 +102,45 @@
                         markers.push(marker);
         
                         // 마커 클릭 이벤트 
-                        marker.addListener('click', () => {
-                            getPlaceDetails(place.place_id, marker);
-                        });
+                marker.addListener('click', () => {
+                    // 장소 상세 정보 가져오기
+                    getPlaceDetails(place.place_id).then(placeDetails => {
+                        if (placeDetails && placeDetails.length > 0) {
+                            const details = placeDetails[0]; // 첫 번째 요소 사용
+
+                            // infoWindow에 내용 설정
+                            let contentString = `
+                                <div style="text-align: center;">
+                                    <h4>${details.name}</h4>
+                                    <p>${details.rating !== null ? `평점: ${details.rating}` : '평점 제공되지 않음'}</p>
+                                    ${details.photos && details.photos.length > 0 ? `<img src="${details.photos[0].getUrl({'maxWidth': 200, 'maxHeight': 200})}" alt="장소 이미지" />` : ''}
+                                    <p><strong>장소 유형:</strong> ${details.types.join(', ')}</p>
+                                    <p><strong>주소:</strong> ${details.address}</p>
+                                    <p><strong>위치:</strong> ${details.lat}, ${details.lng}</p>
+                            `;
+
+                            if (details.reviews && details.reviews.length > 0) {
+                                const review = details.reviews[0];
+                                contentString += `
+                                    <div><strong>리뷰:</strong> ${review.text}</div>
+                                    <div><strong>작성자:</strong> ${review.author_name}</div>
+                                `;
+                            } else {
+                                contentString += "<p>리뷰가 없습니다.</p>";
+                            }
+
+                            contentString += "</div>";
+
+                            // infoWindow 띄우기
+                            infoWindow.setContent(contentString);
+                            infoWindow.open(map, marker);
+                        } else {
+                            console.error("장소 데이터가 유효하지 않습니다:", placeDetails);
+                        }
+                    }).catch(error => {
+                        console.error("장소 정보를 가져오는 도중 오류 발생:", error);
+                    });
+                });
                     });
                 } else {
                     console.log("장소 검색 실패:", status);
@@ -118,39 +148,7 @@
             });
         }
 
-        function clearMarker() {
-            // 모든 마커를 지도에서 제거
-            markers.forEach(marker => {
-                marker.setMap(null);
-            });
-            markers = []; // 마커 배열 초기화
-        }
-         
-        // 장소 정보를 가져오는 함수 
-        function getPlaceDetails(placeId, marker) {
-            placesService.getDetails({ placeId: placeId }, (place, status) => {
-                if (status === google.maps.places.PlacesServiceStatus.OK) { // 대문자 'OK'
-                    const infoWindow = new google.maps.InfoWindow({
-                        content: `
-                            <div style="text-align: center;">
-                                <h4>${place.name}</h4>
-                                <img src="${place.photos ? place.photos[0].getUrl({ maxWidth: 100 }) : ''}" alt="${place.name}" style="width: 100px; height: auto;">
-                                <p>${place.formatted_address}</p>
-                                <p>${place.rating ? `Rating: ${place.rating}` : 'No rating available'}</p>
-                                <p>${place.international_phone_number ? `전화: ${place.international_phone_number}` : ''}</p>
-                                <p>${place.website ? `<a href="${place.website}" target="_blank">웹사이트</a>` : ''}</p>
-                            </div>
-                        `,      
-                    });
-                    infoWindow.open(map, marker);
-                    map.setZoom(15);
-                    map.setCenter(marker.getPosition());
-                } else {
-                    console.error("장소 세부 정보를 가져오는 데 실패했습니다:", status);
-                }
-            });
-        }
-
+        // 주소를 위도 경도 변환
         function geocodeAddress(address) {
             geocoder.geocode({ address: address }, (results, status) => {
                 if (status === "OK") {
@@ -178,12 +176,58 @@
             });
         }
 
-        // 마커 추가 함수
-        function addMarker(location, title, placeId) {
+        // 장소 정보 가져오기
+        function getPlaceId(location) {
+            const lat = parseFloat(location.lat().toFixed(4));
+            const lng = parseFloat(location.lng().toFixed(4));
+
+            console.log("클릭한 위치 - 위도:", lat, "경도:", lng);
+
+            // 근처 장소 검색 요청
+            const request = {
+                location: new google.maps.LatLng(lat, lng),
+                radius: 50, // 50m 반경 내에서 검색
+                type: "store" // 없으면 아무장소나 조회됨
+            };
+
+            placesService.nearbySearch(request, (results, status) => {
+                if (status === google.maps.places.PlacesServiceStatus.OK && results.length > 0) {
+                    const place = results[0]; // 가장 가까운 첫 번째 장소 선택
+                    const placeId = place.place_id;     
+                    console.log("가장 가까운 장소의 Place ID:", placeId);
+        
+                    getPlaceDetails(placeId); // 가져온 placeId로 장소 상세 정보 요청
+
+                    // 마커 추가 시 placeId 전달
+                    addMarker(location, "New Marker", placeId)
+                } else {
+                    console.log("근처에 검색된 장소가 없습니다.");
+                }
+            });
+        }
+
+        // 장소 상세 정보 가져오는 기능
+        function getPlaceDetails(placeId) {
+        const url = `/place?placeId=${placeId}`;
+
+        return fetch(url)  // API 엔드포인트를 사용해서 장소 정보를 가져옵니다.
+            .then(response => response.json())
+            .then(placeDetails => {
+                console.log("받아온 장소 데이터:", placeDetails);
+                return placeDetails;  // 장소 정보를 반환합니다.
+            })
+            .catch(error => {
+                console.error("장소 정보를 가져오는 도중 오류 발생:", error);
+                throw error;  // 오류를 던져서 호출한 쪽에서 처리할 수 있게 합니다.
+            });
+        }
+
+         // 마커 추가 함수
+         function addMarker(location, title="New Marker", placeId) {
             const marker = new google.maps.Marker({
                 position: location,
                 map: map,
-                title: title || "New Marker",
+                title: title,
                 icon: {
                     url: "/static/images/location.png", // 커스텀 아이콘 URL
                     scaledSize: new google.maps.Size(30, 30) // 아이콘 크기 조정
@@ -193,16 +237,69 @@
             // placeId 정의된 경우에만 마커를 추가
             if (placeId) {
                 marker.placeId = placeId;
+                
                 // 마커 클릭 이벤트
                 marker.addListener('click', () => {
-                    getPlaceDetails(marker.placeId, marker); // placeId가 존재할 때만
-                }); 
-            }
+
+                console.log("마커클릭")
+
+                // 장소 상세 정보 가져오기
+            getPlaceDetails(marker.placeId).then(placeDetails => {
+                if (placeDetails && placeDetails.length > 0) {
+                    const details = placeDetails[0]; // 첫 번째 요소 사용
+
+                    // infoWindow에 내용 설정
+                    let contentString = `
+                        <div style="text-align: center;">
+                            <h4>${details.name}</h4>
+                            <p>${details.rating !== null ? `평점: ${details.rating}` : '평점 제공되지 않음'}</p>
+                            ${details.photos && details.photos.length > 0 ? `<img src="${details.photos[0].getUrl({'maxWidth': 200, 'maxHeight': 200})}" alt="장소 이미지" />` : ''}
+                            <p><strong>장소 유형:</strong> ${details.types.join(', ')}</p>
+                            <p><strong>주소:</strong> ${details.address}</p>
+                            <p><strong>위치:</strong> ${details.lat}, ${details.lng}</p>
+                    `;
+
+                    if (details.reviews && details.reviews.length > 0) {
+                        const review = details.reviews[0];
+                        contentString += `
+                            <div><strong>리뷰:</strong> ${review.text}</div>
+                            <div><strong>작성자:</strong> ${review.author_name}</div>
+                        `;
+                    } else {
+                        contentString += "<p>리뷰가 없습니다.</p>";
+                    }
+
+                    contentString += "</div>";
+
+                    // infoWindow 띄우기
+                    infoWindow.setContent(contentString);
+                    infoWindow.open(map, marker);
+                } else {
+                    console.error("장소 데이터가 유효하지 않습니다:", placeDetails);
+                }
+            }).catch(error => {
+                console.error("장소 정보를 가져오는 도중 오류 발생:", error);
+            });
+        });
+    }
             
             markers.push(marker); // 새로 생성한 마커를 배열에 추가
 
             // 폴리라인 업데이트
             updatePolyline();
+        }     
+
+        // 마커 초기화
+        function clearMarkers() {
+            markers.forEach(marker => {
+                marker.setMap(null);
+            });
+            markers = [];
+
+            if (polyline) {
+                polyline.setMap(null); // 기존 폴리라인 제거
+                polyline = null; // 폴리라인 변수 초기화
+            }
         }
 
         // 폴리라인 업데이트 함수
@@ -230,6 +327,7 @@
     <h1>Google Maps</h1>
     <input id="search" type="text" placeholder="장소를 입력하세요">
     <button id="searchButton">검색</button>
+    <button id="clearMarkersButton">마커 초기화</button> 
     <div id="map"></div>
     <div id="result" style="margin-top: 20px"></div>
 </body>
