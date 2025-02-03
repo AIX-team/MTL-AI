@@ -1,121 +1,127 @@
-from typing import List, Optional, Dict
 import os
-from datetime import datetime
-from urllib.parse import urlparse, parse_qs
-from googleapiclient.discovery import build
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+import datetime
+from typing import List
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings
-from models.youtube_model import (
-    YouTubeTranscript, 
-    VideoInfo, 
-    VideoMetadata,
-    ChunkData,
-    SubtitleChunk
-)
 from langchain.schema import Document
-from langdetect import detect
+from langchain_community.vectorstores.utils import filter_complex_metadata
+from models.youtube_schemas import VideoInfo, PlaceInfo
 
 class YouTubeRepository:
     def __init__(self):
-        self.api_key = os.getenv("YOUTUBE_API_KEY")
-        self.youtube = build('youtube', 'v3', developerKey=self.api_key)
-        self.embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
-    
-    def extract_video_id(self, url: str) -> str:
-        """URL에서 YouTube 비디오 ID 추출"""
-        parsed_url = urlparse(url)
-        if parsed_url.hostname == 'youtu.be':
-            return parsed_url.path[1:]
-        if parsed_url.hostname in ('www.youtube.com', 'youtube.com'):
-            if parsed_url.path == '/watch':
-                return parse_qs(parsed_url.query)['v'][0]
-        raise ValueError("유효하지 않은 YouTube URL입니다.")
-    
-    def get_transcript(self, video_id: str) -> List[YouTubeTranscript]:
-        """자막 가져오기"""
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(
-                video_id,
-                languages=['ko', 'en']
-            )
-            return [YouTubeTranscript(**t) for t in transcript]
-        except Exception as e:
-            raise Exception(f"자막을 가져오는데 실패했습니다: {str(e)}")
-    
-    def get_video_metadata(self, video_id: str) -> VideoMetadata:
-        """비디오 메타데이터 가져오기"""
-        try:
-            response = self.youtube.videos().list(
-                part='snippet,statistics',
-                id=video_id
-            ).execute()
-            
-            if not response['items']:
-                raise ValueError("비디오를 찾을 수 없습니다.")
-            
-            video_data = response['items'][0]
-            snippet = video_data['snippet']
-            statistics = video_data['statistics']
-            
-            return VideoMetadata(
-                video_id=video_id,
-                title=snippet['title'],
-                channel_name=snippet['channelTitle'],
-                publish_date=datetime.fromisoformat(snippet['publishedAt'].replace('Z', '+00:00')),
-                view_count=int(statistics.get('viewCount', 0)),
-                description=snippet.get('description', '')
-            )
-        except Exception as e:
-            raise Exception(f"비디오 정보를 가져오는데 실패했습니다: {str(e)}")
+        self.summary_dir = "summaries"
+        self.chunks_dir = "chunks"
+        self.vector_db_path = "vector_dbs/youtube_vectordb"
+        self.embedding = OpenAIEmbeddings()
+        self._ensure_directories()
 
-    def get_video_info(self, video_id: str) -> VideoInfo:
-        # YouTube API를 사용하여 비디오 정보 가져오기
-        pass
+    def _ensure_directories(self):
+        """필요한 디렉토리들이 존재하는지 확인하고 없으면 생성"""
+        for directory in [self.summary_dir, self.chunks_dir, self.vector_db_path]:
+            if not os.path.exists(directory):
+                os.makedirs(directory)
 
-    def get_subtitles(self, video_id: str, languages: List[str] = ['ko', 'en']) -> List[SubtitleChunk]:
-        """자막 가져오기 및 청크로 분할"""
-        try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+    def save_to_vectordb(self, final_summary: str, video_infos: List[VideoInfo], place_details: List[PlaceInfo]) -> None:
+        """처리된 YouTube 데이터를 벡터 DB에 저장"""
+        documents = []
+
+        # 비디오 정보 저장
+        for video_info in video_infos:
+            video_metadata = {
+                'url': video_info.url,
+                'type': 'video_info',
+                'title': video_info.title,
+                'channel': video_info.channel
+            }
+            video_metadata = {k: v for k, v in video_metadata.items() if v is not None}  # None 값 제거
             
-            chunks = []
-            for t in transcript:
-                chunk = SubtitleChunk(
-                    content=t['text'],
-                    start_time=t['start'],
-                    end_time=t['start'] + t['duration'],
-                    language=detect(t['text'])
-                )
-                chunks.append(chunk)
-                
-            return chunks
-            
-        except (TranscriptsDisabled, NoTranscriptFound) as e:
-            raise Exception(f"자막을 가져올 수 없습니다: {str(e)}")
-            
-    def save_to_vectordb(self, chunks: List[SubtitleChunk], metadata: VideoMetadata):
-        """벡터 DB에 저장"""
-        try:
-            documents = [
-                Document(
-                    page_content=chunk.content,
-                    metadata={
-                        "video_id": metadata.video_id,
-                        "title": metadata.title,
-                        "start_time": chunk.start_time,
-                        "end_time": chunk.end_time,
-                        "language": chunk.language
-                    }
-                )
-                for chunk in chunks
-            ]
-            
-            vectordb = Chroma(
-                persist_directory="vector_dbs",
-                embedding_function=self.embeddings
+            doc = Document(
+                page_content=f"제목: {video_info.title}\n채널: {video_info.channel}\n",
+                metadata=video_metadata
             )
+            documents.append(doc)
+
+        # 장소 정보 저장
+        # 장소 정보 저장 (수정된 코드)
+        for place in place_details:
+            place_metadata = {
+                'type': 'place_info',
+                'name': place.name if place.name is not None else "정보 없음",
+                'rating': place.rating if place.rating is not None else "정보 없음",
+                'address': place.formatted_address if place.formatted_address is not None else "정보 없음",
+                'photos': ", ".join([photo.url for photo in place.photos]) if place.photos else "정보 없음"
+            }
             
-            vectordb.add_documents(documents)
-            
-        except Exception as e:
-            raise Exception(f"벡터 DB 저장 실패: {str(e)}") 
+            place_doc = Document(
+                page_content=f"장소명: {place.name}\n주소: {place.formatted_address or '정보 없음'}\n",
+                metadata=place_metadata
+            )
+            documents.append(place_doc)
+
+
+
+        # 최종 요약 저장
+        summary_metadata = {'type': 'summary'}
+        summary_doc = Document(
+            page_content=final_summary,
+            metadata=summary_metadata
+        )
+        documents.append(summary_doc)
+
+        # Chroma DB에 저장
+        vectordb = Chroma.from_documents(
+            documents=documents,
+            embedding=self.embedding,
+            persist_directory=self.vector_db_path
+        )
+        vectordb.persist()
+
+        print("✅ 벡터 DB 저장 완료")
+
+
+
+
+
+
+
+    def query_vectordb(self, query: str, k: int = 3) -> List[Document]:
+        """벡터 DB에서 검색"""
+        if not os.path.exists(self.vector_db_path):
+            raise ValueError("❌ 벡터 DB가 존재하지 않습니다.")
+
+        vectordb = Chroma(
+            persist_directory=self.vector_db_path,
+            embedding_function=self.embedding
+        )
+        
+        results = vectordb.similarity_search(query, k=k)
+        
+        # 검색된 결과 확인
+        for doc in results:
+            if not isinstance(doc, Document):
+                print(f"⚠️ 검색 결과에 잘못된 데이터 포함됨: {type(doc)} - {doc}")
+        
+        return [doc for doc in results if isinstance(doc, Document)]
+    
+    
+
+
+
+
+
+    def save_chunks(self, chunks: List[str]) -> None:
+        """텍스트 청크들을 파일로 저장"""
+        for idx, chunk in enumerate(chunks, 1):
+            file_path = os.path.join(self.chunks_dir, f"chunk_{idx}.txt")
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(chunk)
+
+    def save_final_summary(self, final_summary: str) -> str:
+        """최종 요약을 파일로 저장하고 파일 경로 반환"""
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = os.path.join(self.summary_dir, f"final_summary_{timestamp}.txt")
+        
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(final_summary)
+        
+        return file_path 

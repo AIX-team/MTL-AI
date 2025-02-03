@@ -4,7 +4,8 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from routers.googleMap import router as google_map_router  # 라우터 설정
-from routers.extract import router as extract_router  # Extract 라우터 추가
+from routers.youtube_router import router as youtube_router
+
 
 app = FastAPI(
     title="YouTube Info Extractor API",
@@ -16,7 +17,7 @@ templates = Jinja2Templates(directory="templates")
 
 # 라우터 설정
 app.include_router(google_map_router)
-app.include_router(extract_router)  # Extract 라우터 등록
+app.include_router(youtube_router, prefix="/youtube", tags=["YouTube"])
 
 # 정적 파일 서빙
 app.mount("/static", StaticFiles(directory="static"), name="static")

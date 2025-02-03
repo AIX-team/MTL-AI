@@ -35,3 +35,7 @@ tiktoken>=0.5.2
 # 텍스트 처리
 beautifulsoup4>=4.12.2
 langdetect>=1.0.9
+
+# 추가된 패키지
+dotenv
+openai

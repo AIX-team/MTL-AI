@@ -10,37 +10,31 @@ from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, No
 from bs4 import BeautifulSoup
 import openai
 from googleapiclient.discovery import build
-from langchain.vectorstores import Chroma
-from langchain.schema import Document
-from langchain.embeddings import OpenAIEmbeddings
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+import googlemaps
+from typing import Dict, Any
 
 # -------------------
 # 0. 환경 변수 및 상수 설정
 # -------------------
 
 # .env 파일 로드
-load_dotenv()  # 기본적으로 프로젝트 루트의 .env 파일을 찾습니다
-
-# 환경변수 로드 확인을 위한 디버깅 출력
-print("OPENAI_API_KEY2:", os.getenv("OPENAI_API_KEY2"))
+load_dotenv(dotenv_path=".env")  # .env 파일 경로 확인
 
 # OpenAI API 키 설정
-openai.api_key = os.getenv("OPENAI_API_KEY2")
+openai.api_key = os.getenv("OPENAI_API_KEY")
+print(f"OpenAI API Key: {'설정됨' if openai.api_key else '설정되지 않음'}")  # 디버깅용
 
 # 구글 API 키 설정
 GEOCODING_API_KEY = os.getenv("GOOGLE_GEOCODING_API_KEY")
 GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")
+print(f"Google Geocoding API Key: {'설정됨' if GEOCODING_API_KEY else '설정되지 않음'}")  # 디버깅용
+print(f"Google Places API Key: {'설정됨' if GOOGLE_PLACES_API_KEY else '설정되지 않음'}")  # 디버깅용
 
 # 사용할 상수들
 MAX_URLS = 5  # 최대 URL 개수
 CHUNK_SIZE = 2048  # 각 텍스트 청크의 최대 토큰 수 (조정 가능)
 MODEL = "gpt-4o-mini"  # 사용할 OpenAI 모델
 FINAL_SUMMARY_MAX_TOKENS = 1500  # 최종 요약의 최대 토큰 수
-
-# 벡터 DB 경로
-MAIN_DB_PATH = os.getenv("MAIN_DB_PATH", "main_db")
 
 # -------------------
 # 1. 메인 실행 흐름
@@ -62,11 +56,14 @@ def process_urls(urls):
                     'title': video_title,
                     'channel': channel_name
                 })
+                print(f"영상 정보 추출 완료: 제목='{video_title}', 채널='{channel_name}'")
+            else:
+                print("영상 정보 추출 실패.")
             
             # 1-2) URL을 처리하여 텍스트를 얻습니다.
             text = process_link(url)
             all_text += f"\n\n--- URL {idx} 내용 ---\n{text}"
-            print(f"URL {idx} 처리 완료.")
+            print(f"URL {idx} 텍스트 추출 완료.")
         except Exception as e:
             print(f"URL {idx} 처리 중 오류 발생: {e}")
     
@@ -91,6 +88,8 @@ def process_urls(urls):
     place_details = []
     place_names = extract_place_names(final_summary)
     
+    print(f"추출된 장소 이름: {place_names}")  # 디버깅 출력
+    
     for place_name in place_names:
         print(f"\n{place_name} 정보 수집 중...")
         details = {}
@@ -100,20 +99,27 @@ def process_urls(urls):
             google_details = search_place_details(place_name)
             if google_details:
                 details.update(google_details)
+                print(f"{place_name}의 Google Places API 정보 수집 완료.")
                 
                 # (6-2) 가져온 place_name으로 사진 URL도 함께 수집합니다.
                 photo_url = get_place_photo_google(place_name, GOOGLE_PLACES_API_KEY)
-                if photo_url and photo_url != "사진을 찾을 수 없습니다." and photo_url != "API 요청 실패.":
+                if photo_url and photo_url not in ["사진을 찾을 수 없습니다.", "API 요청 실패."]:
                     details['photos'] = [{
                         'url': photo_url,
                         'title': f'{place_name} 사진',
                         'description': f'{place_name}의 Google Places API를 통해 가져온 사진입니다.'
                     }]
+                    print(f"{place_name}의 사진 URL 수집 완료.")
+                else:
+                    print(f"{place_name}의 사진 URL 수집 실패: {photo_url}")
         except Exception as e:
             print(f"Google Places API 오류: {e}")
         
         if details:
             place_details.append(details)
+            print(f"{place_name}의 상세 정보가 place_details에 추가되었습니다.")
+        else:
+            print(f"{place_name}의 상세 정보가 수집되지 않았습니다.")
     
     # (7) 처리 시간 계산
     end_time = time.time()
@@ -137,7 +143,7 @@ URL: {info['url']}"""
     else:
         final_result += f"""
 URL: {chr(10).join(urls)}"""
-
+    
     final_result += f"\n{'='*50}\n"
 
     # (9) 장소별 정보 통합(유튜브 요약내용 + 구글 정보)
@@ -156,13 +162,14 @@ URL: {chr(10).join(urls)}"""
             place_section = final_summary[start_idx:end_idx]
             
             places_info[place_name]['youtuber_info'] = place_section.split('\n')
-
+    
     # (10) Google Places API 정보와 매칭
     for place in place_details:
         place_name = place.get('name')
         if place_name in places_info:
             places_info[place_name]['google_info'] = place
-
+            print(f"{place_name}의 Google Places 정보가 places_info에 매칭되었습니다.")
+    
     # (11) 장소별 상세 정보 문자열에 추가
     final_result += "\n=== 장소별 상세 정보 ===\n"
     
@@ -184,38 +191,40 @@ URL: {chr(10).join(urls)}"""
                     continue
                     
                 if line.startswith('- 장소설명:'):
-                    place_desc = line
+                    place_desc = line.replace('- 장소설명:', '').strip()
                 elif line.startswith('- 먹은 음식:'):
-                    foods.append(line)
-                elif line.startswith('\t- 설명:') and foods:
-                    foods[-1] += f"\n{line}"
+                    foods.append(line.replace('- 먹은 음식:', '').strip())
                 elif line.startswith('- 유의 사항:'):
-                    precautions.append(line)
-                elif line.startswith('\t- 설명:') and precautions:
-                    precautions[-1] += f"\n{line}"
+                    precautions.append(line.replace('- 유의 사항:', '').strip())
                 elif line.startswith('- 추천 사항:'):
-                    recommendations.append(line)
-                elif line.startswith('\t- 설명:') and recommendations:
-                    recommendations[-1] += f"\n{line}"
+                    recommendations.append(line.replace('- 추천 사항:', '').strip())
+                elif line.startswith('\t- 설명:'):
+                    description = line.replace('\t- 설명:', '').strip()
+                    if foods and not description.startswith('- '):
+                        foods[-1] += f"\n  설명: {description}"
+                    elif precautions and not description.startswith('- '):
+                        precautions[-1] += f"\n  설명: {description}"
+                    elif recommendations and not description.startswith('- '):
+                        recommendations[-1] += f"\n  설명: {description}"
             
             # 카테고리별로 출력
             if place_desc:
-                final_result += f"{place_desc}\n"
+                final_result += f"장소설명: {place_desc}\n"
             
             if foods:
                 final_result += "\n[먹은 음식]\n"
                 for food in foods:
-                    final_result += f"{food}\n"
+                    final_result += f"- {food}\n"
             
             if precautions:
                 final_result += "\n[유의 사항]\n"
                 for precaution in precautions:
-                    final_result += f"{precaution}\n"
+                    final_result += f"- {precaution}\n"
             
             if recommendations:
                 final_result += "\n[추천 사항]\n"
                 for recommendation in recommendations:
-                    final_result += f"{recommendation}\n"
+                    final_result += f"- {recommendation}\n"
         
         # 11-2) 구글 정보
         if info['google_info']:
@@ -225,22 +234,22 @@ URL: {chr(10).join(urls)}"""
                 opening_hours = ['정보 없음']
 
             final_result += f"""
-        [구글 장소 정보]
-        🏠 주소: {google_info.get('formatted_address', '정보 없음')}
-        ⭐ 평점: {google_info.get('rating', '정보 없음')}
-        📞 전화: {google_info.get('phone', '정보 없음')}
-        🌐 웹사이트: {google_info.get('website', '정보 없음')}
-        💰 가격대: {'₩' * google_info.get('price_level', 0) if google_info.get('price_level') else '정보 없음'}
-        ⏰ 영업시간:
-        {chr(10).join(opening_hours)}
+[구글 장소 정보]
+🏠 주소: {google_info.get('formatted_address', '정보 없음')}
+⭐ 평점: {google_info.get('rating', '정보 없음')}
+📞 전화: {google_info.get('phone', '정보 없음')}
+🌐 웹사이트: {google_info.get('website', '정보 없음')}
+💰 가격대: {'₩' * google_info.get('price_level', 0) if google_info.get('price_level') else '정보 없음'}
+⏰ 영업시간:
+{chr(10).join(opening_hours)}
 
-        [사진 및 리뷰]"""
+[사진 및 리뷰]"""
                     
             if 'photos' in google_info and google_info['photos']:
                 for photo_idx, photo in enumerate(google_info['photos'], 1):
                     final_result += f"""
-                📸 사진 {photo_idx}: {photo['url']}
-                ⭐ 베스트 리뷰: {google_info.get('best_review', {}).get('text', '리뷰 없음') if google_info.get('best_review') else '리뷰 없음'}"""
+📸 사진 {photo_idx}: {photo['url']}
+⭐ 베스트 리뷰: {google_info.get('best_review', {}).get('text', '리뷰 없음') if google_info.get('best_review') else '리뷰 없음'}"""
             else:
                 final_result += "\n사진을 찾을 수 없습니다."
         
@@ -248,33 +257,11 @@ URL: {chr(10).join(urls)}"""
     
     # (12) 최종 결과를 파일에 저장
     save_final_summary(final_result)
-
-    # 벡터 DB에 저장
-    try:
-        print("\n벡터 DB에 저장 시도 중...")
-        embeddings = OpenAIEmbeddings()
-        
-        # config.py에서 정의된 통합 경로 사용
-        vectordb = Chroma(
-            persist_directory=VECTOR_DB_PATH,  # /Users/minkyeomkim/Desktop/MTL-FE/src/ai_vector/vector_dbs/main_vectordb
-            embedding_function=embeddings
-        )
-        
-        metadata = {"url": urls[0] if urls else ""}
-        doc = Document(
-            page_content=final_result,
-            metadata=metadata
-        )
-        
-        vectordb.add_documents([doc])
-        vectordb.persist()
-        print(f"벡터 DB가 {VECTOR_DB_PATH}에 성공적으로 저장되었습니다.")
-    except Exception as e:
-        print(f"벡터 DB에 저장하는데 오류가 발생했습니다: {str(e)}")
-        import traceback
-        print(traceback.format_exc())
-
-    return final_result
+    return {
+        'final_summary': final_result,
+        'video_infos': video_infos,
+        'processing_time_seconds': processing_time
+    }
 
 
 # -------------------
@@ -291,7 +278,11 @@ def get_video_info(video_url):
         response = requests.get(api_url)
         if response.status_code == 200:
             data = response.json()
-            return data.get('title'), data.get('author_name')
+            title = data.get('title')
+            author_name = data.get('author_name')
+            print(f"[get_video_info] 제목: {title}, 채널: {author_name}")  # 디버깅 출력
+            return title, author_name
+        print(f"[get_video_info] API 응답 상태 코드: {response.status_code}")
         return None, None
     except Exception as e:
         print(f"영상 정보를 가져오는데 실패했습니다: {e}")
@@ -307,6 +298,7 @@ def process_link(url):
     적절한 방법으로 텍스트를 추출해서 반환합니다.
     """
     link_type = detect_link_type(url)
+    print(f"[process_link] 링크 유형 감지: {link_type}")  # 디버깅 출력
     
     if link_type == "youtube":
         text = get_youtube_transcript(url)
@@ -315,6 +307,7 @@ def process_link(url):
     else:  # 웹페이지
         text = get_text_from_webpage(url)
     
+    print(f"[process_link] 추출된 텍스트 길이: {len(text)}")  # 디버깅 출력
     return text
 
 
@@ -342,14 +335,17 @@ def get_youtube_transcript(video_url):
     한국어 자막 우선 -> 영어 자막 -> 기타 언어 자막 순으로 시도합니다.
     """
     video_id = video_url.split("v=")[-1].split("&")[0]  # 비디오 ID 추출
+    print(f"[get_youtube_transcript] 비디오 ID: {video_id}")  # 디버깅 출력
     try:
         transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
         # 우선 한국어 자막 시도
         if transcripts.find_transcript(['ko']):
             transcript = transcripts.find_transcript(['ko']).fetch()
             transcript_text = "\n".join([f"[{format_timestamp(entry['start'])}] {entry['text']}" for entry in transcript])
+            print(f"[get_youtube_transcript] 한국어 자막 추출 완료. 길이: {len(transcript_text)}")
             return transcript_text
     except (TranscriptsDisabled, NoTranscriptFound):
+        print("[get_youtube_transcript] 한국어 자막 없음.")
         pass
     except Exception as e:
         raise ValueError(f"비디오 {video_id}의 자막을 가져오는데 실패했습니다: {e}")
@@ -359,8 +355,10 @@ def get_youtube_transcript(video_url):
         if transcripts.find_transcript(['en']):
             transcript = transcripts.find_transcript(['en']).fetch()
             transcript_text = "\n".join([f"[{format_timestamp(entry['start'])}] {entry['text']}" for entry in transcript])
+            print(f"[get_youtube_transcript] 영어 자막 추출 완료. 길이: {len(transcript_text)}")
             return transcript_text
     except (TranscriptsDisabled, NoTranscriptFound):
+        print("[get_youtube_transcript] 영어 자막 없음.")
         pass
     except Exception as e:
         raise ValueError(f"비디오 {video_id}의 자막을 가져오는데 실패했습니다: {e}")
@@ -369,6 +367,7 @@ def get_youtube_transcript(video_url):
         # 기타 언어 자막 시도
         transcript = transcripts.find_transcript(transcripts._languages).fetch()
         transcript_text = "\n".join([f"[{format_timestamp(entry['start'])}] {entry['text']}" for entry in transcript])
+        print(f"[get_youtube_transcript] 기타 언어 자막 추출 완료. 길이: {len(transcript_text)}")
         return transcript_text
     except Exception as e:
         raise ValueError(f"비디오 {video_id}의 자막을 가져오는데 실패했습니다: {e}")
@@ -394,6 +393,7 @@ def get_text_from_file(url):
         response = requests.get(url)
         response.raise_for_status()
         text = response.text.strip()
+        print(f"[get_text_from_file] 텍스트 파일 추출 완료. 길이: {len(text)}")
         return text
     except Exception as e:
         raise ValueError(f"텍스트 파일 내용을 가져오는데 오류가 발생했습니다: {e}")
@@ -411,6 +411,7 @@ def get_text_from_webpage(url):
         text = soup.get_text(separator="\n").strip()
         # 길이 제한 10000자
         text = text[:10000]
+        print(f"[get_text_from_webpage] 웹페이지 텍스트 추출 완료. 길이: {len(text)}")
         return text
     except Exception as e:
         raise ValueError(f"웹페이지 내용을 가져오는데 오류가 발생했습니다: {e}")
@@ -433,6 +434,7 @@ def split_text(text, max_chunk_size=CHUNK_SIZE):
         end = start + (max_chunk_size // 5)
         chunk = ' '.join(words[start:end])
         chunks.append(chunk)
+    print(f"[split_text] 총 단어 수: {total_words}, 청크 수: {num_chunks}")
     return chunks
 
 
@@ -443,12 +445,14 @@ def save_chunks(chunks, directory="chunks"):
     """텍스트 청크를 개별 파일로 저장합니다."""
     if not os.path.exists(directory):
         os.makedirs(directory)
+        print(f"[save_chunks] '{directory}' 디렉토리 생성.")
     
     for idx, chunk in enumerate(chunks, 1):
         file_path = os.path.join(directory, f"chunk_{idx}.txt")
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(chunk)
-    print(f"{len(chunks)}개의 청크가 '{directory}' 디렉토리에 저장되었습니다.")
+        print(f"[save_chunks] 청크 {idx} 저장: {file_path}")
+    print(f"[save_chunks] {len(chunks)}개의 청크가 '{directory}' 디렉토리에 저장되었습니다.")
 
 
 # -------------------
@@ -476,43 +480,44 @@ def summarize_text(transcript_chunks, model=MODEL):
             summary = response.choices[0].message.content
             summaries.append(summary)
             print(f"청크 {idx+1}/{len(transcript_chunks)} 요약 완료.")
+            print(f"[청크 {idx+1} 요약 내용 일부]")
+            print(summary[:500])  # 첫 500자 출력
         except Exception as e:
             raise ValueError(f"요약 중 오류 발생: {e}")
     
     # (2) 개별 요약을 합쳐서 최종 요약
     combined_summaries = "\n".join(summaries)
     final_prompt = f"""
-                아래는 여러 청크로 나뉜 요약입니다. 이 요약들을 통합하여 다음의 형식으로 최종 요약을 작성해 주세요. 반드시 아래 형식을 따르고, 빠지는 내용 없이 모든 정보를 포함해 주세요.
-                **요구 사항:**
-                1. 장소, 음식, 유의 사항, 추천 사항 등 각각의 정보를 세부적으로 작성해 주세요.
-                2. 만약 해당 장소에서 먹은 음식, 유의 사항, 추천 사항이 없다면 작성하지 않고 넘어가도 됩니다.
-                3. 방문한 장소가 없거나 유의 사항만 있을 때, 유의 사항 섹션에 모아주세요.
-                4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
-                5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
+아래는 여러 청크로 나뉜 요약입니다. 이 요약들을 통합하여 다음의 형식으로 최종 요약을 작성해 주세요. 반드시 아래 형식을 따르고, 빠지는 내용 없이 모든 정보를 포함해 주세요.
+**요구 사항:**
+1. 장소, 음식, 유의 사항, 추천 사항 등 각각의 정보를 세부적으로 작성해 주세요.
+2. 만약 해당 장소에서 먹은 음식, 유의 사항, 추천 사항이 없다면 작성하지 않고 넘어가도 됩니다.
+3. 방문한 장소가 없거나 유의 사항만 있을 때, 유의 사항 섹션에 모아주세요.
+4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
+5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
 
-                결과는 아래 형식으로 작성해 주세요
-                아래는 예시입니다. 
+결과는 아래 형식으로 작성해 주세요
+아래는 예시입니다. 
 
-                방문한 장소: 스미다 타워 (주소) 타임스탬프: [HH:MM:SS]
-                - 장소설명: [유튜버의 설명] 도쿄 스카이트리를 대표하는 랜드마크로, 전망대에서 도쿄 시내를 한눈에 볼 수 있습니다. 유튜버가 방문했을 때는 날씨가 좋아서 후지산까지 보였고, 야경이 특히 아름다웠다고 합니다.
-                - 먹은 음식: 라멘 이치란
-                    - 설명: 진한 국물과 쫄깃한 면발로 유명한 라멘 체인점으로, 개인실에서 편안하게 식사할 수 있습니다.
-                - 유의 사항: 혼잡한 시간대 피하기
-                    - 설명: 관광지 주변은 특히 주말과 휴일에 매우 혼잡할 수 있으므로, 가능한 평일이나 이른 시간에 방문하는 것이 좋습니다.
-                - 추천 사항: 스카이 트리 전망대 방문
-                    - 설명: 도쿄의 아름다운 야경을 감상할 수 있으며, 사진 촬영 하기에 최적의 장소입니다.
+방문한 장소: 스미다 타워 (주소) 타임스탬프: [HH:MM:SS]
+- 장소설명: [유튜버의 설명] 도쿄 스카이트리를 대표하는 랜드마크로, 전망대에서 도쿄 시내를 한눈에 볼 수 있습니다. 유튜버가 방문했을 때는 날씨가 좋아서 후지산까지 보였고, 야경이 특히 아름다웠다고 합니다.
+- 먹은 음식: 라멘 이치란
+    - 설명: 진한 국물과 쫄깃한 면발로 유명한 라멘 체인점으로, 개인실에서 편안하게 식사할 수 있습니다.
+- 유의 사항: 혼잡한 시간대 피하기
+    - 설명: 관광지 주변은 특히 주말과 휴일에 매우 혼잡할 수 있으므로, 가능한 평일이나 이른 시간에 방문하는 것이 좋습니다.
+- 추천 사항: 스카이 트리 전망대 방문
+    - 설명: 도쿄의 아름다운 야경을 감상할 수 있으며, 사진 촬영 하기에 최적의 장소입니다.
 
-                방문한 장소: 유니버셜 스튜디오 일본 (주소) 타임스탬프: [HH:MM:SS]
-                - 장소설명: [유튜버의 설명] 유튜버가 방문했을 때는 평일임에도 사람이 많았지만, 싱글라이더를 이용해서 대기 시간을 많이 줄일 수 있었습니다. 특히 해리포터 구역의 분위기가 실제 영화의 한 장면에 들어온 것 같았고, 버터맥주도 맛있었다고 합니다.
-                - 유의 사항: 짧은 옷 착용 
-                    - 설명: 팀랩 플래닛의 일부 구역에서는 물이 높고 거울이 있으므로, 짧은 옷을 입는 것이 좋다.
+방문한 장소: 유니버셜 스튜디오 일본 (주소) 타임스탬프: [HH:MM:SS]
+- 장소설명: [유튜버의 설명] 유튜버가 방문했을 때는 평일임에도 사람이 많았지만, 싱글라이더를 이용해서 대기 시간을 많이 줄일 수 있었습니다. 특히 해리포터 구역의 분위기가 실제 영화의 한 장면에 들어온 것 같았고, 버터맥주도 맛있었다고 합니다.
+- 유의 사항: 짧은 옷 착용 
+    - 설명: 팀랩 플래닛의 일부 구역에서는 물이 높고 거울이 있으므로, 짧은 옷을 입는 것이 좋다.
 
-                **요약 청크:**
-                {combined_summaries}
+**요약 청크:**
+{combined_summaries}
 
-                **최종 요약:**
-
-            """
+**최종 요약:**
+"""
     try:
         final_response = openai.chat.completions.create(
             model=model,
@@ -524,6 +529,8 @@ def summarize_text(transcript_chunks, model=MODEL):
             max_tokens=4096
         )
         final_summary = final_response.choices[0].message.content
+        print("\n[최종 요약 내용 일부]")
+        print(final_summary[:1000])  # 첫 1000자 출력
         return final_summary
     except Exception as e:
         raise ValueError(f"최종 요약 중 오류 발생: {e}")
@@ -544,42 +551,43 @@ def generate_prompt(transcript_chunk):
         translation_instruction = ""
 
     base_prompt = f"""
-        {translation_instruction}
-        아래는 여행 유튜버가 촬영한 영상의 자막입니다. 
-        이 자막에서 방문한 장소, 먹은 음식, 유의 사항, 추천 사항을 분석하여 정리해 주세요.
+{translation_instruction}
+아래는 여행 유튜버가 촬영한 영상의 자막입니다. 이 자막에서 방문한 장소, 먹은 음식, 유의 사항, 추천 사항을 분석하여 정리해 주세요.
 
-        **요구 사항:**
-        1. 장소, 음식, 유의 사항, 추천 사항 등 각각의 정보를 세부적으로 작성해 주세요.
-        2. 만약 해당 장소에서 먹은 음식, 유의 사항, 추천 사항이 없다면 작성하지 않고 넘어가도 됩니다.
-        3. 방문한 장소가 없거나 유의 사항만 있을 때, 유의 사항 섹션에 모아주세요.
-        4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
-        5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
-        6. 장소 설명은 반드시 유튜버가 언급한 내용을 바탕으로 작성해 주세요. 유튜버의 실제 경험과 평가를 포함해야 합니다.
+**요구 사항:**
+1. 장소, 음식, 유의 사항, 추천 사항 등 각각의 정보를 세부적으로 작성해 주세요.
+2. 만약 해당 장소에서 먹은 음식, 유의 사항, 추천 사항이 없다면 작성하지 않고 넘어가도 됩니다.
+3. 방문한 장소가 없거나 유의 사항만 있을 때, 유의 사항 섹션에 모아주세요.
+4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
+5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
+6. 장소 설명은 반드시 유튜버가 언급한 내용을 바탕으로 작성해 주세요. 유튜버의 실제 경험과 평가를 포함해야 합니다.
 
-        **결과 형식:**
+**결과 형식:**
 
-        결과는 아래 형식으로 작성해 주세요
-        아래는 예시입니다. 
+결과는 아래 형식으로 작성해 주세요
+아래는 예시입니다. 
 
-        방문한 장소: 스미다 타워 (주소) 타임스탬프: [HH:MM:SS]
-        - 장소설명: [유튜버의 설명] 도쿄 스카이트리를 대표하는 랜드마크로, 전망대에서 도쿄 시내를 한눈에 볼 수 있습니다. 유튜버가 방문했을 때는 날씨가 좋아서 후지산까지 보였고, 야경이 특히 아름다웠다고 합니다.
-        - 먹은 음식: 라멘 이치란
-            - 설명: 진한 국물과 쫄깃한 면발로 유명한 라멘 체인점으로, 개인실에서 편안하게 식사할 수 있습니다.
-        - 유의 사항: 혼잡한 시간대 피하기
-            - 설명: 관광지 주변은 특히 주말과 휴일에 매우 혼잡할 수 있으므로, 가능한 평일이나 이른 시간에 방문하는 것이 좋습니다.
-        - 추천 사항: 스카이 트리 전망대 방문
-            - 설명: 도쿄의 아름다운 야경을 감상할 수 있으며, 사진 촬영 하기에 최적의 장소입니다.
+방문한 장소: 스미다 타워 (주소) 타임스탬프: [HH:MM:SS]
+- 장소설명: [유튜버의 설명] 도쿄 스카이트리를 대표하는 랜드마크로, 전망대에서 도쿄 시내를 한눈에 볼 수 있습니다. 유튜버가 방문했을 때는 날씨가 좋아서 후지산까지 보였고, 야경이 특히 아름다웠다고 합니다.
+- 먹은 음식: 라멘 이치란
+    - 설명: 진한 국물과 쫄깃한 면발로 유명한 라멘 체인점으로, 개인실에서 편안하게 식사할 수 있습니다.
+- 유의 사항: 혼잡한 시간대 피하기
+    - 설명: 관광지 주변은 특히 주말과 휴일에 매우 혼잡할 수 있으므로, 가능한 평일이나 이른 시간에 방문하는 것이 좋습니다.
+- 추천 사항: 스카이 트리 전망대 방문
+    - 설명: 도쿄의 아름다운 야경을 감상할 수 있으며, 사진 촬영 하기에 최적의 장소입니다.
 
-        방문한 장소: 유니버셜 스튜디오 일본 (주소) 타임스탬프: [HH:MM:SS]
-        - 장소설명: [유튜버의 설명] 유튜버가 방문했을 때는 평일임에도 사람이 많았지만, 싱글라이더를 이용해서 대기 시간을 많이 줄일 수 있었습니다. 특히 해리포터 구역의 분위기가 실제 영화의 한 장면에 들어온 것 같았고, 버터맥주도 맛있었다고 합니다.
-        - 유의 사항: 짧은 옷 착용 
-            - 설명: 팀랩 플래닛의 일부 구역에서는 물이 높고 거울이 있으므로, 짧은 옷을 입는 것이 좋다.
+방문한 장소: 유니버셜 스튜디오 일본 (주소) 타임스탬프: [HH:MM:SS]
+- 장소설명: [유튜버의 설명] 유튜버가 방문했을 때는 평일임에도 사람이 많았지만, 싱글라이더를 이용해서 대기 시간을 많이 줄일 수 있었습니다. 특히 해리포터 구역의 분위기가 실제 영화의 한 장면에 들어온 것 같았고, 버터맥주도 맛있었다고 합니다.
+- 유의 사항: 짧은 옷 착용 
+    - 설명: 팀랩 플래닛의 일부 구역에서는 물이 높고 거울이 있으므로, 짧은 옷을 입는 것이 좋다.
 
-        **자막:**
-        {transcript_chunk}
+**자막:**
+{transcript_chunk}
 
-        이 자막을 바탕으로 위의 요구 사항에 맞는 정보를 작성해 주세요. 특히 장소 설명은 반드시 유튜버가 실제로 언급한 내용과 경험을 바탕으로 작성해 주세요.
-        """
+위 자막을 바탕으로 위의 요구 사항에 맞는 정보를 작성해 주세요. 특히 장소 설명은 반드시 유튜버가 실제로 언급한 내용과 경험을 바탕으로 작성해 주세요.
+"""
+    print("\n[generate_prompt] 생성된 프롬프트 일부:")
+    print(base_prompt[:500])  # 첫 500자 출력
     return base_prompt
 
 
@@ -601,83 +609,40 @@ def extract_place_names(summary):
             except Exception as e:
                 print(f"장소 이름 추출 중 오류 발생: {e}")
                 continue
-    
     return place_names
 
 
 # -------------------
 # 13. process_urls -> search_place_details
 # -------------------
-def search_place_details(place_name):
-    """
-    Google Places API를 사용하여 장소의 상세 정보를 검색합니다.
-    - 가장 평점이 높은(혹은 5점 리뷰가 있다면 가장 긴) 리뷰를 'best_review'로 설정
-    - 사진, 연락처, 영업시간, 웹사이트 등 정보를 함께 가져옵니다.
-    """
+def search_place_details(place_name: str) -> Dict[str, Any]:
+    """Google Places API를 사용하여 장소 상세 정보 검색"""
     try:
-        # 장소 검색 (일본 지역 우선)
-        search_url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        search_params = {
-            "query": f"{place_name} ",
-            "key": GOOGLE_PLACES_API_KEY,
-            "language": "ko",
-            "region": "jp"
-        }
+        # Places API 클라이언트 초기화
+        gmaps = googlemaps.Client(key=os.getenv("GOOGLE_PLACES_API_KEY"))
         
-        response = requests.get(search_url, params=search_params)
-        data = response.json()
+        # 장소 검색
+        places_result = gmaps.places(place_name)
         
-        if data.get('results'):
-            place = data['results'][0]
+        if places_result['results']:
+            place = places_result['results'][0]
+            
+            # 상세 정보 구성
             details = {
-                'name': place.get('name'),
-                'formatted_address': place.get('formatted_address'),
+                'name': place.get('name', ''),
+                'formatted_address': place.get('formatted_address', ''),
                 'rating': place.get('rating'),
-                'place_id': place.get('place_id')
+                'phone': place.get('formatted_phone_number', ''),
+                'website': place.get('website', ''),
+                'price_level': place.get('price_level'),
+                'opening_hours': place.get('opening_hours', {}).get('weekday_text', []),
+                'photos': []
             }
             
-            # 장소 상세 정보 가져오기
-            details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-            details_params = {
-                "place_id": details['place_id'],
-                "fields": "formatted_phone_number,website,opening_hours,price_level,reviews,photos,editorial_summary,price_level,current_opening_hours",
-                "key": GOOGLE_PLACES_API_KEY,
-                "language": "ko",
-                "reviews_sort": "rating"
-            }
-            
-            details_response = requests.get(details_url, params=details_params)
-            details_data = details_response.json()
-            
-            if 'result' in details_data:
-                result = details_data['result']
-                
-                # 평점이 가장 높은 리뷰 가져오기
-                best_review = None
-                if 'reviews' in result:
-                    reviews = result['reviews']
-                    five_star_reviews = [r for r in reviews if r.get('rating', 0) == 5]
-                    if five_star_reviews:
-                        best_review = max(five_star_reviews, key=lambda x: len(x.get('text', '')))
-                    else:
-                        best_review = max(reviews, key=lambda x: (x.get('rating', 0), len(x.get('text', ''))))
-                
-                details.update({
-                    'phone': result.get('formatted_phone_number'),
-                    'website': result.get('website'),
-                    'opening_hours': result.get('opening_hours', {}).get('weekday_text'),
-                    'current_opening_hours': result.get('current_opening_hours', {}).get('weekday_text'),
-                    'price_level': result.get('price_level'),
-                    'best_review': best_review,
-                    'photos': result.get('photos', [])[:5],
-                    'editorial_summary': result.get('editorial_summary', {}).get('overview')
-                })
             return details
-        else:
-            print(f"장소를 찾을 수 없음: {place_name}")
-            return None
+            
     except Exception as e:
-        print(f"장소 상세 정보 검색 중 오류 발생: {e}")
+        print(f"장소 정보 검색 중 오류 발생: {e}")
         return None
 
 
@@ -690,47 +655,56 @@ def get_place_photo_google(place_name, api_key):
     place_id로 사진의 photoreference를 얻고
     최종적으로 사진 URL을 반환합니다.
     """
-    search_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
-    search_params = {
-        "input": place_name,
-        "inputtype": "textquery",
-        "fields": "photos,place_id",
-        "key": api_key
-    }
-    search_response = requests.get(search_url, params=search_params)
-    if search_response.status_code == 200:
-        search_data = search_response.json()
-        if search_data['candidates']:
-            place_id = search_data['candidates'][0]['place_id']
-            details_url = "https://maps.googleapis.com/maps/api/place/details/json"
-            details_params = {
-                "place_id": place_id,
-                "fields": "photos",
-                "key": api_key
-            }
-            details_response = requests.get(details_url, params=details_params)
-            if details_response.status_code == 200:
-                details_data = details_response.json()
-                if 'photos' in details_data['result']:
-                    photo_reference = details_data['result']['photos'][0]['photo_reference']
-                    photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference={photo_reference}&key={api_key}"
-                    return photo_url
-        return "사진을 찾을 수 없습니다."
-    else:
+    try:
+        search_url = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json"
+        search_params = {
+            "input": place_name,
+            "inputtype": "textquery",
+            "fields": "photos,place_id",
+            "key": api_key
+        }
+        search_response = requests.get(search_url, params=search_params)
+        if search_response.status_code == 200:
+            search_data = search_response.json()
+            if search_data.get('candidates'):
+                place_id = search_data['candidates'][0]['place_id']
+                details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+                details_params = {
+                    "place_id": place_id,
+                    "fields": "photos",
+                    "key": api_key
+                }
+                details_response = requests.get(details_url, params=details_params)
+                if details_response.status_code == 200:
+                    details_data = details_response.json()
+                    if 'result' in details_data and 'photos' in details_data['result']:
+                        photo_reference = details_data['result']['photos'][0]['photo_reference']
+                        photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference={photo_reference}&key={api_key}"
+                        print(f"[get_place_photo_google] 사진 URL 생성 완료: {photo_url}")  # 디버깅 출력
+                        return photo_url
+            print(f"[get_place_photo_google] 사진을 찾을 수 없음: {place_name}")
+            return "사진을 찾을 수 없습니다."
+        else:
+            print(f"[get_place_photo_google] API 요청 실패: 상태 코드 {search_response.status_code}")
+            return "API 요청 실패."
+    except Exception as e:
+        print(f"[get_place_photo_google] 오류 발생: {e}")
         return "API 요청 실패."
 
 
 # -------------------
 # 15. process_urls -> save_final_summary
 # -------------------
-def save_final_summary(final_summary):
-    os.makedirs(SUMMARY_DIR, exist_ok=True)
+def save_final_summary(final_summary, file_path="final_summary.txt"):
+    """최종 요약을 파일로 저장합니다."""
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(SUMMARY_DIR, f"final_summary_{timestamp}.txt")
+    file_path = f"final_summary_{timestamp}.txt"
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(final_summary)
         print(f"최종 요약이 '{file_path}' 파일에 저장되었습니다.")
+        print("\n[save_final_summary] 최종 요약 내용 일부:")
+        print(final_summary[:1000])  # 첫 1000자 출력
     except Exception as e:
         print(f"최종 요약을 저장하는데 오류가 발생했습니다: {e}")
 
@@ -752,19 +726,27 @@ def get_address_google(place_name, api_key):
     Google Geocoding API를 통해 주소를 찾는 함수.
     원본 코드에 포함되어 있으나 실제로는 사용되지 않습니다.
     """
-    base_url = "https://maps.googleapis.com/maps/api/geocode/json"
-    params = {
-        "address": place_name,
-        "key": api_key
-    }
-    response = requests.get(base_url, params=params)
-    if response.status_code == 200:
-        data = response.json()
-        if data['results']:
-            return data['results'][0]['formatted_address']
+    try:
+        base_url = "https://maps.googleapis.com/maps/api/geocode/json"
+        params = {
+            "address": place_name,
+            "key": api_key
+        }
+        response = requests.get(base_url, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            if data['results']:
+                address = data['results'][0]['formatted_address']
+                print(f"[get_address_google] 주소 찾음: {address}")  # 디버깅 출력
+                return address
+            else:
+                print(f"[get_address_google] 주소를 찾을 수 없음: {place_name}")
+                return "주소를 찾을 수 없습니다."
         else:
-            return "주소를 찾을 수 없습니다."
-    else:
+            print(f"[get_address_google] API 요청 실패: 상태 코드 {response.status_code}")
+            return "API 요청 실패."
+    except Exception as e:
+        print(f"[get_address_google] 오류 발생: {e}")
         return "API 요청 실패."
 
 
@@ -785,13 +767,5 @@ if __name__ == "__main__":
             summary = process_urls(input_urls)
             print("\n[최종 요약]")
             print(summary)
-            
-            print("\n벡터 DB 확인을 위해 run_vectordb.py를 실행합니다...")
-            run_vectordb_path = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                'ai_vector',
-                'run_vectordb.py'
-            )
-            os.system(f"python3 {run_vectordb_path}")
         except Exception as e:
             print(f"오류: {e}")
