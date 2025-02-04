@@ -6,16 +6,15 @@ class YouTubeRequest(BaseModel):
 
 class VideoInfo(BaseModel):
     url: str
-    title: str
-    channel: str
+    title: Optional[str] = None
+    channel: Optional[str] = None
 
 class PlacePhoto(BaseModel):
     url: str
-    title: Optional[str] = None  # 선택적 필드
-    description: Optional[str] = None  # 선택적 필드
 
 class PlaceInfo(BaseModel):
     name: str
+    description: Optional[str] = None
     formatted_address: Optional[str] = None
     rating: Optional[float] = None
     phone: Optional[str] = None
@@ -24,9 +23,10 @@ class PlaceInfo(BaseModel):
     opening_hours: Optional[List[str]] = None
     photos: Optional[List[PlacePhoto]] = None
     best_review: Optional[str] = None
+    google_info: Optional[dict] = None
 
 class YouTubeResponse(BaseModel):
     final_summary: str
     video_infos: List[VideoInfo]
     processing_time_seconds: float
-    place_details: Optional[List[PlaceInfo]] = None
+    place_details: List[PlaceInfo]

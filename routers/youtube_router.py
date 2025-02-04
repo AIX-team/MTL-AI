@@ -14,7 +14,7 @@ class SearchResponse(BaseModel):
     content: str
     metadata: dict
 
-@router.post("/processyoutube", 
+@router.post("/contentanalysis", 
             response_model=YouTubeResponse,
             summary="YouTube 영상 정보 추출",
             description="YouTube URL을 받아 영상의 자막을 추출하고, 내용을 요약하며, 관련된 장소 정보를 수집합니다.")
@@ -37,7 +37,7 @@ async def process_youtube(request: YouTubeRequest):
             detail=f"처리 중 오류가 발생했습니다: {str(e)}"
         )
 
-@router.post("/search", response_model=List[SearchResponse])
+@router.post("/vectorsearch", response_model=List[SearchResponse])
 async def search_content(request: SearchRequest):
     """벡터 DB에서 콘텐츠 검색"""
     try:

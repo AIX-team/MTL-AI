@@ -17,7 +17,7 @@ templates = Jinja2Templates(directory="templates")
 
 # 라우터 설정
 app.include_router(google_map_router)
-app.include_router(youtube_router, prefix="/youtube", tags=["YouTube"])
+app.include_router(youtube_router, tags=["YouTube"])
 
 # 정적 파일 서빙
 app.mount("/static", StaticFiles(directory="static"), name="static")
