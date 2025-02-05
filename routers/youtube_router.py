@@ -58,3 +58,5 @@ async def search_content(request: SearchRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"검색 중 오류가 발생했습니다: {str(e)}"
         ) 
+    
+

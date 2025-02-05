@@ -3,6 +3,7 @@ import os
 import requests
 import datetime
 import tiktoken
+from cachetools import TTLCache
 from math import ceil
 from langdetect import detect
 from dotenv import load_dotenv
@@ -17,6 +18,11 @@ from repository.youtube_repository import YouTubeRepository
 from langchain.schema import Document
 from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from fastapi import APIRouter, HTTPException, status
+
+
 
 from ai_api.youtube_subtitle import (
     get_video_info, process_link, split_text, summarize_text,
@@ -139,41 +145,131 @@ class ContentService:
         else:
             return YouTubeSubtitleService._get_text_from_webpage(url)
 
+    # @staticmethod
+    # def _get_naver_blog_content(url: str) -> str:
+    #     """네이버 블로그 컨텐츠 추출 (선택자 수정 예시)"""
+    #     # try:
+    #     #     headers = {
+    #     #         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    #     #     }
+    #     #     response = requests.get(url, headers=headers)
+    #     #     soup = BeautifulSoup(response.text, 'html.parser')
+            
+    #     #     # 1. iframe 존재 여부 확인 (PC 버전의 경우)
+    #     #     iframe = soup.find('iframe', id='mainFrame')
+    #     #     if iframe and iframe.get('src'):
+    #     #         real_url = f"https://blog.naver.com{iframe['src']}"
+    #     #         response = requests.get(real_url, headers=headers)
+    #     #         soup = BeautifulSoup(response.text, 'html.parser')
+            
+    #     #     # 2. 본문 컨텐츠를 포함하는 태그 선택 (예시: 'div.se-main-container' 또는 'div#postViewArea')
+    #     #     content = soup.find('div', {'class': 'se-main-container'})
+    #     #     if not content:
+    #     #         content = soup.find('div', {'id': 'postViewArea'})
+    #     #     if not content:
+    #     #         return "컨텐츠를 찾을 수 없습니다."
+            
+    #     #     # 불필요한 태그 제거
+    #     #     for element in content.find_all(['script', 'style']):
+    #     #         element.decompose()
+            
+    #     #     text = content.get_text(separator='\n').strip()
+    #     #     return text
+    #     # except Exception as e:
+    #     #     print(f"네이버 블로그 컨텐츠 추출 실패: {e}")
+    #     #     return "컨텐츠 추출 실패"
+    #     options = Options()
+    #     options.add_argument('--headless')  # 창 없이 실행
+    #     options.add_argument('--disable-gpu')
+    #     options.add_argument('--no-sandbox')
+        
+    #     # ChromeDriver의 경로가 필요합니다. PATH에 추가되어 있다면 생략 가능.
+    #     driver = webdriver.Chrome(options=options)
+    #     driver.get(url)
+        
+    #     # 페이지 로딩을 기다림 (필요에 따라 대기 시간 조정)
+    #     time.sleep(3)
+        
+    #     # PC 버전 네이버 블로그의 경우 iframe이 있을 수 있으므로 전환
+    #     try:
+    #         driver.switch_to.frame("mainFrame")
+    #     except Exception as e:
+    #         print("iframe 전환 실패 (없을 수도 있음):", e)
+        
+    #     html = driver.page_source
+    #     driver.quit()
+        
+    #     soup = BeautifulSoup(html, 'html.parser')
+        
+    #     # 본문 컨텐츠 선택 (예: 'div.se-main-container' 또는 'div#postViewArea')
+    #     content = soup.find('div', {'class': 'se-main-container'})
+    #     if not content:
+    #         content = soup.find('div', {'id': 'postViewArea'})
+    #     if not content:
+    #         return "컨텐츠를 찾을 수 없습니다."
+        
+    #     for tag in content.find_all(['script', 'style']):
+    #         tag.decompose()
+        
+    #     text = content.get_text(separator='\n').strip()
+    #     return text
+
     @staticmethod
     def _get_naver_blog_content(url: str) -> str:
-        """네이버 블로그 컨텐츠 추출"""
+        """네이버 블로그에서 본문을 가져오는 함수 (불필요한 개행 및 공백, 광고 제거 포함)"""
+        cache = TTLCache(maxsize=10, ttl=300)
+
+        if url in cache:
+            return cache[url]
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+
+        def clean_text(text: str) -> str:
+            import re
+            text = re.sub(r'\s+', ' ', text)  # 연속된 공백을 하나로 변환
+            text = re.sub(r'[^\S\r\n]+', ' ', text)  # 유니코드 공백 제거
+            text = re.sub(r'©.*?(?= )', '', text)   # © 등 불필요한 문구 제거
+            text = re.sub(r'\[바로가기\]', '', text)
+            return text.strip()
+
         try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+            # 첫 번째 요청으로 iframe URL 가져오기
             response = requests.get(url, headers=headers)
+            response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # iframe 내부의 실제 컨텐츠 URL 찾기
-            if 'blog.naver.com' in url:
-                iframe = soup.find('iframe', id='mainFrame')
-                if iframe and iframe.get('src'):
-                    real_url = f"https://blog.naver.com{iframe['src']}"
-                    response = requests.get(real_url, headers=headers)
-                    soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # 본문 컨텐츠 찾기
+
+            # iframe 찾기 (새 버전 블로그)
+            iframe = soup.find('iframe', id='mainFrame')
+            if iframe and iframe.get('src'):
+                real_url = f"https://blog.naver.com{iframe['src']}"
+                response = requests.get(real_url, headers=headers)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+            # 새로운 버전 블로그 영역
             content = soup.find('div', {'class': 'se-main-container'})
             if not content:
-                content = soup.find('div', {'class': 'post-content'})
-            
-            if content:
-                # 불필요한 요소 제거
-                for element in content.find_all(['script', 'style']):
-                    element.decompose()
-                
-                text = content.get_text(separator='\n').strip()
-                return text
-            
-            return "컨텐츠를 찾을 수 없습니다."
+                # 구버전 블로그 영역
+                content = soup.find('div', {'class': 'post-view'})
+            if not content:
+                raise HTTPException(status_code=404, detail="본문을 찾을 수 없습니다.")
+
+            # 불필요한 태그 제거
+            for tag in content.find_all(['script', 'style']):
+                tag.decompose()
+
+            text = clean_text(content.get_text(separator='\n'))
+            cache[url] = text
+            return text
+
+        except requests.RequestException as e:
+            raise HTTPException(status_code=500, detail=f"블로그 데이터를 가져오는 중 오류 발생: {str(e)}")
         except Exception as e:
-            print(f"네이버 블로그 컨텐츠 추출 실패: {e}")
-            return "컨텐츠 추출 실패"
+            raise HTTPException(status_code=500, detail=f"처리 중 오류 발생: {str(e)}")
+
+
 
     @staticmethod
     def _get_tistory_blog_content(url: str) -> str:
@@ -255,20 +351,34 @@ class YouTubeService:
                         print(f"YouTube 영상 '{video_info.title}'에서 추출된 장소: {len(video_places)}개")
                 
                 elif 'blog.naver.com' in parsed_url.netloc:
-                    # 네이버 블로그 처리
-                    blog_info = self._get_blog_info(url)
+                    # 네이버 블로그 제목 및 작성자 정보 가져오기
+                    title, author = self.content_service._get_naver_blog_info(url)
+
+                    # 네이버 블로그 본문 가져오기
+                    content = self.content_service.process_content(url)  # 여기서 _get_naver_blog_content 함수가 호출됨
+                    # 본문을 청크로 나누기
+                    chunks = self.text_service.split_text(content)
+                    # 청크들을 요약해서 최종 요약 생성
+                    summary = self.text_service.summarize_text(chunks)
+
+                    # 네이버 블로그 콘텐츠 정보 저장
                     content_info = ContentInfo(
                         url=url,
-                        title=blog_info['title'],
-                        author=blog_info['author'],
+                        title=title,
+                        author=author,
                         platform=ContentType.NAVER_BLOG
                     )
                     content_infos.append(content_info)
-                    
-                    # 장소 정보 추출 (source_url 포함)
+
+                    # (원하는 경우) 요약된 결과를 추가적으로 활용할 수도 있습니다.
+                    # 예를 들어, summary를 로그로 남기거나 최종 결과에 포함시키기
+
+                    # 네이버 블로그에서 장소 정보 추출
                     blog_places = self._process_naver_blog(url)
                     place_details.extend(blog_places)
-                    print(f"네이버 블로그 '{blog_info['title']}'에서 추출된 장소: {len(blog_places)}개")
+
+                    print(f"네이버 블로그 '{title}'에서 추출된 장소: {len(blog_places)}개")
+
 
             processing_time = time.time() - start_time
 
@@ -351,7 +461,7 @@ class YouTubeService:
                     )
                     
                     # Google Places API 검색 시도
-                    places_result = self.gmaps.places(place_name)
+                    places_result = self.gmaps.places(place_name, language='ja', region='jp')
                     if places_result['results']:
                         place = places_result['results'][0]
                         place_id = place['place_id']
@@ -916,7 +1026,7 @@ class TextProcessingService:
                 summaries.append(summary)
                 print(f"청크 {idx+1}/{len(transcript_chunks)} 요약 완료.")
                 print(f"[청크 {idx+1} 요약 내용 일부]")
-                print(summary[:500])
+                print(summary[:9500])
             except Exception as e:
                 raise ValueError(f"요약 중 오류 발생: {e}")
 
@@ -930,6 +1040,8 @@ class TextProcessingService:
 3. 방문한 장소가 없거나 유의 사항만 있을 때, 유의 사항 섹션에 모아주세요.
 4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
 5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
+7. 본문 내에 언급된 모든 장소 (예: "도쿄 해리포터 스튜디오", "노보리베츠" 등)를 반드시 결과에 포함시켜 주세요.
+
 **결과 형식:**
 
 결과는 아래 형식으로 작성해 주세요
@@ -990,6 +1102,8 @@ class TextProcessingService:
 4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
 5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
 6. 장소 설명은 반드시 유튜버가 실제로 언급한 내용을 바탕으로 작성해 주세요. 유튜버의 실제 경험과 평가를 포함해야 합니다.
+7. 본문 내에 언급된 모든 장소 (예: "도쿄 해리포터 스튜디오", "노보리베츠" 등)를 반드시 결과에 포함시켜 주세요.
+
 **결과 형식:**
 
 결과는 아래 형식으로 작성해 주세요
@@ -1024,24 +1138,23 @@ class PlaceService:
     @staticmethod
     def extract_place_names(summary: str) -> List[str]:
         """요약 텍스트에서 장소 이름을 추출"""
-        place_names = []
-        lines = summary.split("\n")
+        place_names = set()  # 중복 방지를 위해 set 사용
         
-        for line in lines:
-            if "장소설명:" in line or "방문한 장소:" in line:
-                try:
-                    # "장소설명:" 또는 "방문한 장소:" 이후의 텍스트에서 장소 이름 추출
-                    place_info = line.split(":", 1)[1].strip()
-                    # 괄호가 있는 경우 괄호 앞의 텍스트만 추출
-                    place_name = place_info.split("(")[0].strip()
-                    if place_name and place_name not in place_names:
-                        place_names.append(place_name)
-                except Exception as e:
-                    print(f"장소 이름 추출 중 오류 발생: {e}")
-                    continue
+        # 모든 청크의 요약에서 장소 추출
+        chunks = summary.split("방문한 장소:")
+        for chunk in chunks[1:]:  # 첫 번째는 건너뛰기
+            try:
+                place_name = chunk.split("(")[0].strip()
+                if place_name:
+                    place_names.add(place_name)
+                    print(f"장소 추출: {place_name}")
+            except Exception as e:
+                print(f"장소 추출 오류: {e}")
+                continue
         
-        print(f"추출된 장소 목록: {place_names}")
-        return place_names
+        result = list(place_names)
+        print(f"총 추출된 장소 목록: {result}")
+        return result
 
     @staticmethod
     def search_place_details(place_name: str) -> Dict[str, Any]:
