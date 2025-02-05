@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
 from typing import List
-from models.youtube_schemas import YouTubeRequest, YouTubeResponse
+from models.youtube_schemas import ContentRequest, YouTubeResponse
 from services.youtube_service import YouTubeService
 from pydantic import BaseModel
 
@@ -16,9 +16,9 @@ class SearchResponse(BaseModel):
 
 @router.post("/contentanalysis", 
             response_model=YouTubeResponse,
-            summary="YouTube 영상 정보 추출",
-            description="YouTube URL을 받아 영상의 자막을 추출하고, 내용을 요약하며, 관련된 장소 정보를 수집합니다.")
-async def process_youtube(request: YouTubeRequest):
+            summary="콘텐츠 분석",
+            description="YouTube 영상, 네이버 블로그, 티스토리 등의 URL을 받아 내용을 분석하고 요약합니다.")
+async def process_content(request: ContentRequest):
     urls = [str(url) for url in request.urls]
     
     # URL 개수 검증
@@ -30,7 +30,17 @@ async def process_youtube(request: YouTubeRequest):
     
     try:
         result = youtube_service.process_urls(urls)
-        return result
+        # 결과가 올바른 형식인지 확인
+        if not isinstance(result["summary"], dict):
+            raise ValueError("최종 요약이 딕셔너리 형식이 아닙니다.")
+        
+        # YouTubeResponse 모델에 맞게 결과 구조화
+        return YouTubeResponse(
+            summary=result["summary"],
+            content_infos=result["content_infos"],
+            processing_time_seconds=result["processing_time_seconds"],
+            place_details=result["place_details"]
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

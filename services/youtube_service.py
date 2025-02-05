@@ -12,9 +12,11 @@ import openai
 from googleapiclient.discovery import build
 import googlemaps
 from typing import List, Dict, Tuple, Any
-from models.youtube_schemas import YouTubeResponse, VideoInfo, PlaceInfo, PlacePhoto
+from models.youtube_schemas import YouTubeResponse, VideoInfo, PlaceInfo, PlacePhoto, ContentType, ContentInfo
 from repository.youtube_repository import YouTubeRepository
 from langchain.schema import Document
+from urllib.parse import urlparse, parse_qs
+from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 from ai_api.youtube_subtitle import (
     get_video_info, process_link, split_text, summarize_text,
@@ -35,105 +37,441 @@ CHUNK_SIZE = 2048
 MODEL = "gpt-4o-mini"
 FINAL_SUMMARY_MAX_TOKENS = 1500
 
+class ContentService:
+    """컨텐츠 처리 서비스"""
+    
+    @staticmethod
+    def get_content_info(url: str) -> Tuple[str, str, ContentType]:
+        """URL에서 컨텐츠 정보 추출"""
+        content_type = ContentService._detect_content_type(url)
+        
+        if content_type == ContentType.YOUTUBE:
+            title, author = YouTubeSubtitleService.get_video_info(url)
+        elif content_type == ContentType.NAVER_BLOG:
+            title, author = ContentService._get_naver_blog_info(url)
+        elif content_type == ContentType.TISTORY:
+            title, author = ContentService._get_tistory_blog_info(url)
+        else:
+            title, author = ContentService._get_webpage_info(url)
+            
+        return title, author, content_type
+
+    @staticmethod
+    def _detect_content_type(url: str) -> ContentType:
+        """URL 유형 감지"""
+        domain = urlparse(url).netloc.lower()
+        
+        if "youtube.com" in domain or "youtu.be" in domain:
+            return ContentType.YOUTUBE
+        elif "blog.naver.com" in domain:
+            return ContentType.NAVER_BLOG
+        elif ".tistory.com" in domain:
+            return ContentType.TISTORY
+        elif url.endswith(".txt"):
+            return ContentType.TEXT_FILE
+        elif url.startswith("http"):
+            return ContentType.WEBPAGE
+        return ContentType.UNKNOWN
+
+    @staticmethod
+    def _get_naver_blog_info(url: str) -> Tuple[str, str]:
+        """네이버 블로그 정보 추출"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # iframe 내부의 실제 컨텐츠 URL 찾기
+            if 'blog.naver.com' in url:
+                iframe = soup.find('iframe', id='mainFrame')
+                if iframe and iframe.get('src'):
+                    real_url = f"https://blog.naver.com{iframe['src']}"
+                    response = requests.get(real_url, headers=headers)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+            
+            title = soup.find('meta', property='og:title')
+            title = title['content'] if title else "제목 없음"
+            
+            author = soup.find('meta', property='og:article:author')
+            author = author['content'] if author else "작성자 없음"
+            
+            return title, author
+        except Exception as e:
+            print(f"네이버 블로그 정보 추출 실패: {e}")
+            return None, None
+
+    @staticmethod
+    def _get_tistory_blog_info(url: str) -> Tuple[str, str]:
+        """티스토리 블로그 정보 추출"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            title = soup.find('meta', property='og:title')
+            title = title['content'] if title else "제목 없음"
+            
+            author = soup.find('meta', property='og:article:author')
+            author = author['content'] if author else "작성자 없음"
+            
+            return title, author
+        except Exception as e:
+            print(f"티스토리 블로그 정보 추출 실패: {e}")
+            return None, None
+
+    @staticmethod
+    def process_content(url: str) -> str:
+        """URL에서 컨텐츠 추출"""
+        content_type = ContentService._detect_content_type(url)
+        
+        if content_type == ContentType.YOUTUBE:
+            return YouTubeSubtitleService.process_link(url)
+        elif content_type == ContentType.NAVER_BLOG:
+            return ContentService._get_naver_blog_content(url)
+        elif content_type == ContentType.TISTORY:
+            return ContentService._get_tistory_blog_content(url)
+        elif content_type == ContentType.TEXT_FILE:
+            return YouTubeSubtitleService._get_text_from_file(url)
+        else:
+            return YouTubeSubtitleService._get_text_from_webpage(url)
+
+    @staticmethod
+    def _get_naver_blog_content(url: str) -> str:
+        """네이버 블로그 컨텐츠 추출"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # iframe 내부의 실제 컨텐츠 URL 찾기
+            if 'blog.naver.com' in url:
+                iframe = soup.find('iframe', id='mainFrame')
+                if iframe and iframe.get('src'):
+                    real_url = f"https://blog.naver.com{iframe['src']}"
+                    response = requests.get(real_url, headers=headers)
+                    soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 본문 컨텐츠 찾기
+            content = soup.find('div', {'class': 'se-main-container'})
+            if not content:
+                content = soup.find('div', {'class': 'post-content'})
+            
+            if content:
+                # 불필요한 요소 제거
+                for element in content.find_all(['script', 'style']):
+                    element.decompose()
+                
+                text = content.get_text(separator='\n').strip()
+                return text
+            
+            return "컨텐츠를 찾을 수 없습니다."
+        except Exception as e:
+            print(f"네이버 블로그 컨텐츠 추출 실패: {e}")
+            return "컨텐츠 추출 실패"
+
+    @staticmethod
+    def _get_tistory_blog_content(url: str) -> str:
+        """티스토리 블로그 컨텐츠 추출"""
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            response = requests.get(url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 본문 컨텐츠 찾기
+            content = soup.find('div', {'class': 'entry-content'})
+            if not content:
+                content = soup.find('div', {'class': 'article'})
+            
+            if content:
+                # 불필요한 요소 제거
+                for element in content.find_all(['script', 'style']):
+                    element.decompose()
+                
+                text = content.get_text(separator='\n').strip()
+                return text
+            
+            return "컨텐츠를 찾을 수 없습니다."
+        except Exception as e:
+            print(f"티스토리 블로그 컨텐츠 추출 실패: {e}")
+            return "컨텐츠 추출 실패"
+
 class YouTubeService:
     """메인 YouTube 서비스"""
     
     def __init__(self):
+        """YouTubeService 초기화"""
+        from dotenv import load_dotenv
+        load_dotenv()  # .env 파일 로드
+        
         self.repository = YouTubeRepository()
-        self.subtitle_service = YouTubeSubtitleService()
+        self.content_service = ContentService()
         self.text_service = TextProcessingService()
         self.place_service = PlaceService()
-
-    def process_urls(self, urls: List[str]) -> YouTubeResponse:
+        
+        # Google Maps API 키 확인 및 설정
+        google_maps_api_key = os.getenv('GOOGLE_PLACES_API_KEY')  # GOOGLE_MAPS_API_KEY 대신 GOOGLE_PLACES_API_KEY 사용
+        if not google_maps_api_key:
+            raise ValueError("GOOGLE_PLACES_API_KEY 환경 변수가 설정되지 않았습니다.")
+        
         try:
-            start_time = time.time()
-            all_text = ""
-            video_infos = []
-            
-            # 1. URL 처리 및 텍스트 추출
-            for idx, url in enumerate(urls, 1):
-                print(f"\nURL {idx}/{len(urls)} 처리 중: {url}")
-                video_title, channel_name = self.subtitle_service.get_video_info(url)
-                if video_title and channel_name:
-                    video_infos.append(VideoInfo(url=url, title=video_title, channel=channel_name))
-                text = self.subtitle_service.process_link(url)
-                all_text += f"\n\n--- URL {idx} 내용 ---\n{text}"
+            self.gmaps = googlemaps.Client(key=google_maps_api_key)
+        except Exception as e:
+            raise ValueError(f"Google Maps 클라이언트 초기화 실패: {str(e)}")
 
-            # 2. 텍스트 분할 및 요약
-            chunks = self.text_service.split_text(all_text)
+    def process_urls(self, urls: List[str]) -> Dict:
+        """URL 목록을 처리하여 각각의 요약을 생성"""
+        try:
+            content_infos = []
+            place_details = []
+            start_time = time.time()
+
+            for url in urls:
+                parsed_url = urlparse(url)
+                if 'youtube.com' in parsed_url.netloc:
+                    # YouTube 영상 처리
+                    video_id = parse_qs(parsed_url.query).get('v', [None])[0]
+                    if video_id:
+                        # 비디오 정보 가져오기
+                        video_info = self._get_video_info(video_id)
+                        content_info = ContentInfo(
+                            url=url,
+                            title=video_info.title,
+                            author=video_info.channel,
+                            platform=ContentType.YOUTUBE
+                        )
+                        content_infos.append(content_info)
+                        
+                        # 장소 정보 추출 (source_url 포함)
+                        video_places = self._process_youtube_video(video_id, url)
+                        place_details.extend(video_places)
+                        print(f"YouTube 영상 '{video_info.title}'에서 추출된 장소: {len(video_places)}개")
+                
+                elif 'blog.naver.com' in parsed_url.netloc:
+                    # 네이버 블로그 처리
+                    blog_info = self._get_blog_info(url)
+                    content_info = ContentInfo(
+                        url=url,
+                        title=blog_info['title'],
+                        author=blog_info['author'],
+                        platform=ContentType.NAVER_BLOG
+                    )
+                    content_infos.append(content_info)
+                    
+                    # 장소 정보 추출 (source_url 포함)
+                    blog_places = self._process_naver_blog(url)
+                    place_details.extend(blog_places)
+                    print(f"네이버 블로그 '{blog_info['title']}'에서 추출된 장소: {len(blog_places)}개")
+
+            processing_time = time.time() - start_time
+
+            # URL별로 장소 정보 그룹화
+            url_places = {}
+            for place in place_details:
+                if place.source_url not in url_places:
+                    url_places[place.source_url] = []
+                url_places[place.source_url].append(place)
+
+            # 최종 요약 생성 (URL별로 구분된 장소 정보 포함)
+            summaries = {}
+            for content in content_infos:
+                places = url_places.get(content.url, [])
+                summary = self._format_final_result(
+                    content_infos=[content],
+                    place_details=places,
+                    processing_time=processing_time,
+                    urls=[content.url]
+                )
+                summaries[content.url] = summary
+                print(f"'{content.title}' 요약 생성 완료 (장소 {len(places)}개 포함)")
+
+            # 벡터 DB와 파일에 저장
+            try:
+                # 벡터 DB에 저장
+                self.repository.save_to_vectordb(summaries, content_infos, place_details)
+                print("✅ 벡터 DB 저장 완료")
+                
+                # 파일로 저장
+                saved_paths = self.repository.save_final_summary(summaries, content_infos)
+                print(f"✅ 파일 저장 완료: {len(saved_paths)}개 파일")
+                
+                # URL별 저장 결과 로그
+                for content in content_infos:
+                    places_count = len(url_places.get(content.url, []))
+                    print(f"URL: {content.url}")
+                    print(f"- 제목: {content.title}")
+                    print(f"- 플랫폼: {content.platform.value}")
+                    print(f"- 추출된 장소 수: {places_count}")
+                    print("-" * 50)
+                
+            except Exception as e:
+                print(f"저장 중 오류 발생: {str(e)}")
+
+            return {
+                "summary": summaries,
+                "content_infos": [info.dict() for info in content_infos],
+                "processing_time_seconds": processing_time,
+                "place_details": [place.dict() for place in place_details]
+            }
+
+        except Exception as e:
+            raise ValueError(f"URL 처리 중 오류 발생: {str(e)}")
+
+    def _process_youtube_video(self, video_id: str, source_url: str) -> List[PlaceInfo]:
+        """YouTube 영상을 처리하여 장소 정보를 수집"""
+        try:
+            # YouTube 자막 가져오기
+            transcript_text = self._get_youtube_transcript(video_id)
+            
+            # 텍스트 분할 및 요약
+            chunks = self.text_service.split_text(transcript_text)
             summary = self.text_service.summarize_text(chunks)
             
-            # 3. 장소 추출 및 정보 수집
+            # 장소 추출 및 정보 수집
             place_names = self.place_service.extract_place_names(summary)
             print(f"추출된 장소: {place_names}")
             
-            # 4. 장소 정보 수집
+            # 장소 정보 수집
             place_details = []
             for place_name in place_names:
                 try:
                     # Google Places API로 장소 정보 검색
-                    place_info = self.place_service.search_place_details(place_name)
-                    
-                    # 장소 설명 추출 (유튜버 리뷰)
-                    description = self._extract_place_description(summary, place_name)
-                    
-                    if not place_info:
-                        # 구글 정보가 없는 경우
-                        place_details.append(PlaceInfo(
-                            name=place_name,
-                            description=description,
-                            google_info={}  # 빈 딕셔너리로 설정
-                        ))
-                        continue
-                    
-                    # 사진 URL 가져오기
-                    photo_url = self.place_service.get_place_photo_google(place_name)
-                    photos = [PlacePhoto(url=photo_url)] if photo_url else []
-                    
-                    # PlaceInfo 객체 생성
-                    place_details.append(PlaceInfo(
+                    place_info = PlaceInfo(
                         name=place_name,
-                        description=description,
-                        formatted_address=place_info.get('formatted_address'),
-                        rating=place_info.get('rating'),
-                        phone=place_info.get('formatted_phone_number'),
-                        website=place_info.get('website'),
-                        price_level=place_info.get('price_level'),
-                        opening_hours=place_info.get('opening_hours', []),
-                        photos=photos,
-                        best_review=place_info.get('best_review'),
-                        google_info=place_info  # 전체 구글 정보를 딕셔너리로 저장
-                    ))
+                        source_url=source_url,  # source_url 추가
+                        description=self._extract_place_description(summary, place_name),
+                        google_info={}  # 기본값으로 빈 딕셔너리 설정
+                    )
+                    
+                    # Google Places API 검색 시도
+                    places_result = self.gmaps.places(place_name)
+                    if places_result['results']:
+                        place = places_result['results'][0]
+                        place_id = place['place_id']
+                        details = self.gmaps.place(place_id, language='ko')['result']
+                        
+                        # 추가 정보 업데이트
+                        place_info.formatted_address = details.get('formatted_address')
+                        place_info.rating = details.get('rating')
+                        place_info.phone = details.get('formatted_phone_number')
+                        place_info.website = details.get('website')
+                        place_info.price_level = details.get('price_level')
+                        place_info.opening_hours = details.get('opening_hours', {}).get('weekday_text')
+                        place_info.google_info = details
+                        
+                        # 사진 URL 추가
+                        if 'photos' in details:
+                            photo_ref = details['photos'][0]['photo_reference']
+                            photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference={photo_ref}&key={os.getenv('GOOGLE_PLACES_API_KEY')}"
+                            place_info.photos = [PlacePhoto(url=photo_url)]
+                        
+                        # 베스트 리뷰 추가
+                        if 'reviews' in details:
+                            best_review = max(details['reviews'], key=lambda x: x.get('rating', 0))
+                            place_info.best_review = best_review.get('text')
+                    
+                    place_details.append(place_info)
                     print(f"장소 정보 추가 완료: {place_name}")
+                    
                 except Exception as e:
                     print(f"장소 정보 처리 중 오류 발생 ({place_name}): {str(e)}")
-                    # 에러가 발생한 경우
+                    # 에러가 발생해도 기본 정보는 추가
                     place_details.append(PlaceInfo(
                         name=place_name,
-                        description=description,
-                        google_info={}  # 빈 딕셔너리로 설정
+                        source_url=source_url,  # source_url 추가
+                        description=self._extract_place_description(summary, place_name),
+                        google_info={}
                     ))
                     continue
+            
+            return place_details
+            
+        except Exception as e:
+            raise Exception(f"URL 처리 중 오류 발생: {str(e)}")
 
-            # 5. 최종 결과 생성
-            processing_time = time.time() - start_time
-            final_result = self._format_final_result(
-                video_infos=video_infos,
-                final_summary=summary,
-                place_details=place_details,
-                processing_time=processing_time,
-                urls=urls
-            )
+    def _process_naver_blog(self, url: str) -> List[PlaceInfo]:
+        """네이버 블로그 글을 처리하여 요약을 생성"""
+        try:
+            import requests
+            from bs4 import BeautifulSoup
             
-            # 6. 결과 저장
-            self.repository.save_final_summary(final_result)
+            # 블로그 내용 가져오기
+            response = requests.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            return YouTubeResponse(
-                final_summary=final_result,
-                video_infos=video_infos,
-                processing_time_seconds=processing_time,
-                place_details=place_details
-            )
+            # 본문 내용 추출
+            content = soup.get_text()
+            
+            # 텍스트 분할 및 요약
+            chunks = self.text_service.split_text(content)
+            summary = self.text_service.summarize_text(chunks)
+            
+            # 장소 추출 및 정보 수집
+            place_names = self.place_service.extract_place_names(summary)
+            print(f"추출된 장소: {place_names}")
+            
+            # 장소 정보 수집
+            place_details = []
+            for place_name in place_names:
+                try:
+                    # Google Places API로 장소 정보 검색
+                    place_info = PlaceInfo(
+                        name=place_name,
+                        source_url=url,
+                        description=self._extract_place_description(summary, place_name),
+                        google_info={}
+                    )
+                    
+                    # Google Places API 검색 시도
+                    places_result = self.gmaps.places(place_name)
+                    if places_result['results']:
+                        place = places_result['results'][0]
+                        place_id = place['place_id']
+                        details = self.gmaps.place(place_id, language='ko')['result']
+                        
+                        # 추가 정보 업데이트
+                        place_info.formatted_address = details.get('formatted_address')
+                        place_info.rating = details.get('rating')
+                        place_info.phone = details.get('formatted_phone_number')
+                        place_info.website = details.get('website')
+                        place_info.price_level = details.get('price_level')
+                        place_info.opening_hours = details.get('opening_hours', {}).get('weekday_text')
+                        place_info.google_info = details
+                        
+                        # 사진 URL 추가
+                        if 'photos' in details:
+                            photo_ref = details['photos'][0]['photo_reference']
+                            photo_url = f"https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photoreference={photo_ref}&key={os.getenv('GOOGLE_PLACES_API_KEY')}"
+                            place_info.photos = [PlacePhoto(url=photo_url)]
+                        
+                        # 베스트 리뷰 추가
+                        if 'reviews' in details:
+                            best_review = max(details['reviews'], key=lambda x: x.get('rating', 0))
+                            place_info.best_review = best_review.get('text')
+                    
+                    place_details.append(place_info)
+                    print(f"장소 정보 추가 완료: {place_name}")
+                    
+                except Exception as e:
+                    print(f"장소 정보 처리 중 오류 발생 ({place_name}): {str(e)}")
+                    # 에러가 발생해도 기본 정보는 추가
+                    place_details.append(PlaceInfo(
+                        name=place_name,
+                        source_url=url,
+                        description=self._extract_place_description(summary, place_name),
+                        google_info={}
+                    ))
+                    continue
+            
+            return place_details
             
         except Exception as e:
             raise Exception(f"URL 처리 중 오류 발생: {str(e)}")
@@ -141,19 +479,22 @@ class YouTubeService:
     def _extract_place_description(self, summary: str, place_name: str) -> str:
         """요약 텍스트에서 특정 장소에 대한 설명을 추출"""
         try:
-            # 장소 이름을 포함하는 문장들을 찾음
-            sentences = summary.split('.')
-            relevant_sentences = [s.strip() for s in sentences if place_name.lower() in s.lower()]
+            lines = summary.split('\n')
+            description = ""
             
-            if relevant_sentences:
-                return ' '.join(relevant_sentences)
+            for i, line in enumerate(lines):
+                if place_name in line:
+                    # 현재 줄과 다음 몇 줄을 포함하여 설명 추출
+                    description = ' '.join(lines[i:i+3])
+                    break
+            
+            return description.strip() or "장소 설명을 찾을 수 없습니다."
+            
+        except Exception as e:
+            print(f"장소 설명 추출 중 오류 발생: {str(e)}")
             return "장소 설명을 찾을 수 없습니다."
-        except Exception:
-            return "장소 설명 추출 중 오류가 발생했습니다."
 
-    def _format_final_result(self, video_infos: List[VideoInfo], final_summary: str, 
-                           place_details: List[PlaceInfo], processing_time: float,
-                           urls: List[str]) -> str:
+    def _format_final_result(self, content_infos: List[ContentInfo], place_details: List[PlaceInfo], processing_time: float, urls: List[str]) -> str:
         """최종 결과 문자열을 포맷팅하는 메서드"""
         
         # 1. 기본 정보 헤더
@@ -165,11 +506,11 @@ class YouTubeService:
 {'='*50}"""
         
         # 2. 비디오 정보
-        if video_infos:
-            for info in video_infos:
+        if content_infos:
+            for info in content_infos:
                 final_result += f"""
 제목: {info.title}
-채널: {info.channel}
+채널: {info.author}
 URL: {info.url}"""
         else:
             final_result += f"\nURL: {chr(10).join(urls)}"
@@ -229,6 +570,197 @@ URL: {info.url}"""
             return filtered_results
         except Exception as e:
             raise Exception(f"검색 중 오류 발생: {str(e)}")
+
+    @staticmethod
+    def _get_youtube_transcript(video_id: str) -> str:
+        """YouTube 영상의 자막을 가져옴"""
+        try:
+            transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # 1. 먼저 한국어 자막 시도
+            try:
+                transcript = transcripts.find_transcript(['ko'])
+                transcript_text = "\n".join([f"[{YouTubeService._format_timestamp(entry['start'])}] {entry['text']}" 
+                                           for entry in transcript.fetch()])
+                print(f"[get_youtube_transcript] 한국어 자막 추출 완료. 길이: {len(transcript_text)}")
+                return transcript_text
+            except (TranscriptsDisabled, NoTranscriptFound):
+                print("[get_youtube_transcript] 한국어 자막 없음.")
+
+            # 2. 영어 자막 시도
+            try:
+                transcript = transcripts.find_transcript(['en'])
+                transcript_text = "\n".join([f"[{YouTubeService._format_timestamp(entry['start'])}] {entry['text']}" 
+                                           for entry in transcript.fetch()])
+                print(f"[get_youtube_transcript] 영어 자막 추출 완료. 길이: {len(transcript_text)}")
+                return transcript_text
+            except (TranscriptsDisabled, NoTranscriptFound):
+                print("[get_youtube_transcript] 영어 자막 없음.")
+
+            # 3. 사용 가능한 첫 번째 자막 시도
+            try:
+                transcript = transcripts.find_generated_transcript()
+                transcript_text = "\n".join([f"[{YouTubeService._format_timestamp(entry['start'])}] {entry['text']}" 
+                                           for entry in transcript.fetch()])
+                print(f"[get_youtube_transcript] 생성된 자막 추출 완료. 길이: {len(transcript_text)}")
+                return transcript_text
+            except Exception as e:
+                print(f"[get_youtube_transcript] 생성된 자막 추출 실패: {e}")
+
+            raise ValueError("사용 가능한 자막을 찾을 수 없습니다.")
+
+        except Exception as e:
+            raise ValueError(f"비디오 {video_id}의 자막을 가져오는데 실패했습니다: {e}")
+
+    @staticmethod
+    def _format_timestamp(seconds: float) -> str:
+        """초를 시:분:초 형식으로 변환"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        secs = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+    def _get_video_info(self, video_id: str) -> VideoInfo:
+        """YouTube 비디오 정보를 가져옴"""
+        try:
+            import requests
+            
+            # noembed API를 사용하여 비디오 정보 가져오기
+            api_url = f"https://noembed.com/embed?url=https://www.youtube.com/watch?v={video_id}"
+            response = requests.get(api_url)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return VideoInfo(
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    title=data.get('title'),
+                    channel=data.get('author_name')
+                )
+            else:
+                print(f"[get_video_info] API 응답 상태 코드: {response.status_code}")
+                return VideoInfo(
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    title="제목을 가져올 수 없음",
+                    channel="채널 정보를 가져올 수 없음"
+                )
+            
+        except Exception as e:
+            print(f"비디오 정보를 가져오는데 실패했습니다: {e}")
+            return VideoInfo(
+                url=f"https://www.youtube.com/watch?v={video_id}",
+                title="제목을 가져올 수 없음",
+                channel="채널 정보를 가져올 수 없음"
+            )
+
+    def _get_blog_info(self, url: str) -> Dict[str, str]:
+        """네이버 블로그 정보를 가져옴"""
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            
+            response = requests.get(url)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # 블로그 제목 추출 시도
+            title = None
+            title_tag = soup.find('meta', property='og:title')
+            if title_tag:
+                title = title_tag.get('content')
+            
+            if not title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    title = title_tag.text
+            
+            # 작성자 정보 추출 시도
+            author = None
+            author_tag = soup.find('meta', property='og:article:author')
+            if author_tag:
+                author = author_tag.get('content')
+            
+            if not author:
+                # 블로그 URL에서 작성자 ID 추출
+                try:
+                    blog_id = url.split('blog.naver.com/')[1].split('/')[0]
+                    author = f"네이버 블로그 | {blog_id}"
+                except:
+                    author = "네이버 블로그 작성자"
+            
+            return {
+                'title': title or "제목을 가져올 수 없음",
+                'author': author or "작성자 정보를 가져올 수 없음"
+            }
+            
+        except Exception as e:
+            print(f"블로그 정보를 가져오는데 실패했습니다: {e}")
+            return {
+                'title': "제목을 가져올 수 없음",
+                'author': "작성자 정보를 가져올 수 없음"
+            }
+
+    def generate_final_summary(self, content_infos: List[ContentInfo], processing_time: float, place_details: List[PlaceInfo]) -> Dict[str, str]:
+        """최종 요약을 생성"""
+        summaries = {}
+        
+        for content in content_infos:
+            summary = f"=== 여행 정보 요약 ===\n"
+            summary += f"처리 시간: {processing_time:.2f}초\n\n"
+            
+            # 분석한 콘텐츠 정보
+            summary += "분석한 콘텐츠:\n"
+            summary += "=" * 50 + "\n"
+            for idx, info in enumerate(content_infos, 1):
+                summary += f"{idx}. {info.platform.value.upper()}\n"
+                summary += f"제목: {info.title}\n"
+                summary += f"작성자: {info.author}\n"
+                summary += f"URL: {info.url}\n\n"
+            
+            summary += "=" * 50 + "\n\n"
+            
+            # 장소별 상세 정보
+            summary += "=== 장소별 상세 정보 ===\n\n"
+            
+            # 현재 콘텐츠와 관련된 장소만 필터링
+            content_places = [place for place in place_details if place.source_url == content.url]
+            
+            for idx, place in enumerate(content_places, 1):
+                summary += f"{idx}. {place.name}\n"
+                summary += "=" * 50 + "\n\n"
+                
+                # 유튜버/블로거의 리뷰
+                summary += "[유튜버/블로거의 리뷰]\n"
+                summary += f"장소설명: {place.description or '장소 설명을 찾을 수 없습니다.'}\n\n"
+                
+                # 구글 장소 정보가 있는 경우에만 추가
+                if place.google_info:
+                    summary += "[구글 장소 정보]\n"
+                    summary += f"🏠 주소: {place.formatted_address or '정보 없음'}\n"
+                    summary += f"⭐ 평점: {place.rating or 'None'}\n"
+                    summary += f"📞 전화: {place.phone or 'None'}\n"
+                    summary += f"🌐 웹사이트: {place.website or 'None'}\n"
+                    summary += f"💰 가격대: {'₩' * place.price_level if place.price_level else '정보 없음'}\n"
+                    
+                    # 영업시간
+                    summary += "⏰ 영업시간:\n"
+                    if place.opening_hours:
+                        for hours in place.opening_hours:
+                            summary += f"{hours}\n"
+                    else:
+                        summary += "정보 없음\n"
+                    
+                    # 사진 및 리뷰
+                    summary += "\n[사진 및 리뷰]\n"
+                    if place.photos:
+                        for photo_idx, photo in enumerate(place.photos[:1], 1):
+                            summary += f"📸 사진 {photo_idx}: {photo.url}\n"
+                    summary += f"⭐ 베스트 리뷰: {place.best_review or '리뷰 없음'}\n"
+                
+                summary += "=" * 50 + "\n\n"
+            
+            summaries[content.url] = summary
+        
+        return summaries
 
 class YouTubeSubtitleService:
     """YouTube 자막 및 비디오 정보 처리 서비스"""
@@ -457,7 +989,7 @@ class TextProcessingService:
 3. 방문한 장소가 없거나 유의 사항만 있을 때, 유의 사항 섹션에 모아주세요.
 4. 추천 사항만 있는 것들은 추천 사항 섹션에 모아주세요.
 5. 가능한 장소 이름을 알고 있다면 실제 주소를 포함해 주세요.
-6. 장소 설명은 반드시 유튜버가 언급한 내용을 바탕으로 작성해 주세요. 유튜버의 실제 경험과 평가를 포함해야 합니다.
+6. 장소 설명은 반드시 유튜버가 실제로 언급한 내용을 바탕으로 작성해 주세요. 유튜버의 실제 경험과 평가를 포함해야 합니다.
 **결과 형식:**
 
 결과는 아래 형식으로 작성해 주세요
